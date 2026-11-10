@@ -70,7 +70,7 @@ exec(compile(open(CORE, encoding="utf-8").read(), CORE, "exec"), globals())
 | --- | --- | --- |
 | `top_fields` | 必须存在的字段列表；加 `path` 可查嵌套子对象 | 单个对象 |
 | `eq` | 字段值 == 期望值 | 任意可寻址字段 |
-| `exists` | 字段是否存在（默认严格，`null` 也判失败） | 单个或批量顶层字段 |
+| `exists` | 字段是否存在（默认严格，`null` 或 "" 也判失败） | 单个或批量顶层字段 |
 | `list_field` | 数组里每个元素都必须含某字段 | `path` 指向数组 |
 | `for_each` | 对数组每个元素递归执行 `sub` 里的子检查 | `path` 必须指向数组 |
 
@@ -145,7 +145,7 @@ exec(compile(open(CORE, encoding="utf-8").read(), CORE, "exec"), globals())
 | --- | --- |
 | `top_fields` 查的子对象为 `null` / 父级为 `null` | 视为正常，不报错 |
 | `list_field` / `for_each` 的数组为 `null` / 父级为 `null` | 视为正常 |
-| `exists` 字段值为 `null` | 默认**判失败**，`null_ok: True` 才放行 |
+| `exists` 字段值为 `null`或 "" | 默认**判失败**，`null_ok: True` 才放行 |
 | `for_each` 的数组字段**整体不存在** | 加 `null_ok: True` 才放行 |
 | `optional: True` 的字段整体缺失 | 只提示，不算失败 |
 
