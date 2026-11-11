@@ -10,6 +10,10 @@
 #                ★支持批量: {"desc","kind","fields":[...],"null_ok":True,"optional":True}
 #                fields 一次查多个顶层字段；null_ok 放行 null；optional 允许字段整体缺失(只提示不失败)
 #   list_field : 数组里每个元素都必须含某字段；数组为 null 或父级为 null 视为正常
+#   shared_eq  : 与 onRequest 写入的 context.shared 比对（如 object_key 是否被改写成 env 值）
+#                {"desc","kind","path","shared_key"}  响应取值用 path/key，shared 取值用 shared_key
+#                shared_key 省略时依次退化为 path / key；context.shared 不可用(测试脚本为 null)时
+#                打印 ℹ️ 跳过、不计失败；加 "require_shared": True 则改为判 ❌
 #   for_each   : 对【数组】每个元素递归执行 "sub" 里的子检查(可再套 top_fields/list_field/for_each)；
 #                {"desc","kind","path","sub":[ ...子检查... ]}  数组为 null 或父级为 null 视为正常
 #                注意: path 必须指向数组；单个对象请用 top_fields + path
@@ -67,8 +71,20 @@ def _get_value(obj, c):
     return (True, obj[c["key"]]) if c["key"] in obj else (False, None)
 
 
-def _run_check(r, c):
-    """执行单条检查并打印，返回本条贡献的失败数(0 或 >=1)。可被 for_each 递归调用。"""
+def _shared_value(ctx, key):
+    """从 onRequest 写入的 context.shared 里按点分路径取值；shared 不可用时返回 (False, None)。
+    ctx 为 None（本地测试直接调 _run_check）或 shared 不是 dict 时，一律视为不可用。
+    """
+    sh = getattr(ctx, "shared", None) if ctx is not None else None
+    if not isinstance(sh, dict) or not key:
+        return False, None
+    return _get_nested(sh, key)
+
+
+def _run_check(r, c, ctx=None):
+    """执行单条检查并打印，返回本条贡献的失败数(0 或 >=1)。可被 for_each 递归调用。
+    ctx 仅供 shared_eq 读取 context.shared；不传则该项自动跳过（兼容旧调用）。
+    """
     kind = c["kind"]
 
     if kind == "top_fields":
@@ -134,6 +150,24 @@ def _run_check(r, c):
             print(f"{'✅' if ok else '❌'} {c['desc']}")
             return 0 if ok else 1
 
+    elif kind == "shared_eq":
+        # 与 onRequest 写入的 context.shared 比对（跨进程只能靠 shared 传值）
+        skey = c.get("shared_key") or c.get("path") or c.get("key")
+        sh_exists, want = _shared_value(ctx, skey)
+        if not skey:
+            print(f"⚠️ {c['desc']}: 缺少 shared_key（shared_eq 需指定 shared 中的字段名）")
+            return 0
+        if not sh_exists:
+            if c.get("require_shared"):
+                print(f"❌ {c['desc']}: context.shared 中没有 {skey}（onRequest 未写入/未生效，或 shared 为空）")
+                return 1
+            print(f"ℹ️ {c['desc']}: context.shared 不可用或没有 {skey}，跳过")
+            return 0
+        exists, actual = _get_value(r, c)
+        ok = exists and actual == want
+        print(f"{'✅' if ok else '❌'} {c['desc']}: 实际 {actual!r} / shared {want!r}")
+        return 0 if ok else 1
+
     elif kind == "list_field":
         exists, arr = _get_value(r, c)          # 保留 exists，区分“字段缺失”与“值为 null”
         if not exists:
@@ -189,13 +223,24 @@ def _run_check(r, c):
                 for sub in c["sub"]:
                     sc = dict(sub)                              # 不改动原配置
                     sc["desc"] = f"{c['desc']}[{j}]·{sub.get('desc', '')}"
-                    fail += _run_check(item, sc)                # 递归，支持再套 top_fields/list_field/for_each
+                    fail += _run_check(item, sc, ctx)           # 递归，支持再套 top_fields/list_field/for_each
             return fail
 
     else:
         print(f"⚠️ 未知检查类型: {kind}")
         return 0
 
+
+
+def _print_shared(context):
+    """打印 onRequest 写入的 context.shared，方便照着它写测试用例。
+    规则脚本在 onRequest 里自己往 shared 补了字段后，可再调一次本函数看合并结果。
+    """
+    sh = getattr(context, "shared", None)
+    try:
+        print("shared = " + json.dumps(sh, ensure_ascii=False))
+    except Exception:
+        print(f"shared = {sh!r}")
 
 
 def onRequest(context, request):
@@ -223,7 +268,9 @@ def onRequest(context, request):
         context.shared = json.loads(request.body.payload)   # 整个请求体带过去
     except Exception:
         context.shared = {}
-  
+
+    _print_shared(context)                                  # 打印出来，方便写测试用例
+
     # Done
     return request
 
@@ -261,7 +308,7 @@ def onResponse(context, response):
         name = r.get("name") or r.get("event_name") or f"<item-{i}>"
         print(f"—— 检查 [{i}] {name} ——")
         for c in checks:
-            fail += _run_check(r, c)
+            fail += _run_check(r, c, context)
         print()
     print(f"✅ Response成功！响应码预期是{EXPECTED_CODE}: 实际结果{response.code}，CheckList检查完成，失败项: {fail}")
     return response
