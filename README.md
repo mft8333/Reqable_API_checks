@@ -63,8 +63,8 @@ exec(compile(open(CORE, encoding="utf-8").read(), CORE, "exec"), globals())
 | `fields` | 批量字段名列表，用于 `top_fields` / 批量 `exists` |
 | `value` | `eq` 的期望值 |
 | `sub` | `for_each` 的子检查列表，可继续嵌套 |
-| `shared_key` | 仅 `shared_eq`：`context.shared` 里的取值路径；省略时退化为 `path` / `key` |
-| `require_shared` | 仅 `shared_eq`：`True` 时 `shared` 里没有该字段判 ❌，否则只 ℹ️ 跳过 |
+| `shared_key` | 仅 `shared_eq` / `shared_in`：`context.shared` 里的取值路径；省略时退化为 `path` / `key` |
+| `require_shared` | 仅 `shared_eq` / `shared_in`：`True` 时 `shared` 里没有该字段判 ❌，否则只 ℹ️ 跳过 |
 | `null_ok` | `True` 时放行 `null` / 空串 `""`（含父级为 `null`）；在 `for_each` 上还表示「数组字段整体不存在」也放行 |
 | `optional` | `True` 时字段整体缺失只提示、不算失败（随类型变化的可选字段） |
 
@@ -77,6 +77,7 @@ exec(compile(open(CORE, encoding="utf-8").read(), CORE, "exec"), globals())
 | `exists` | 字段是否存在（默认严格，`null` 或 `""` 也判失败） | 单个或批量顶层字段 |
 | `list_field` | 数组里每个元素都必须含某字段 | `path` 指向数组 |
 | `shared_eq` | 响应字段 == `onRequest` 写入 `context.shared` 的值 | 任意可寻址字段 |
+| `shared_in` | 响应字段**属于** `context.shared` 里的列表（列表接口逐条判 ID） | 任意可寻址字段 |
 | `for_each` | 对数组每个元素递归执行 `sub` 里的子检查 | `path` 必须指向数组 |
 
 ### 写法示例
@@ -204,51 +205,90 @@ shared = {"name": "new_template_name1", "temperature": 0.9, "aliases": {...}}
 
 照着它写 `shared_key` 最省事。GET 请求没有 body（或 body 不是 JSON）时，`shared` 是 `{}`。
 
-### 2) 需要 URL 里的 ID 时：在规则脚本里覆盖 `onRequest`
+### 2) 合并版 `onRequest`：一份挂到所有接口
 
-`/v2/tasks/144310` 这类路径，ID 只在 URL 里。规则脚本里定义的同名 `onRequest` 会覆盖引擎的，所以要自己把两件事都做了：
+不写死接口名、也不猜参数名：路径段、查询参数、请求体各收一份进 `shared`，检查时按需取。规则脚本里的同名 `onRequest` 会覆盖引擎那个，所以「打印 URL + 请求体进 shared + 打印 shared」也一并写在里面，不必再调引擎那版。
 
 ```python
-import re
+def _val(v):
+    """纯数字转 int（便于与响应里的数字比）；逗号分隔且每段都是数字转列表；其余保持字符串。"""
+    parts = v.split(",")
+    if len(parts) > 1 and all(p.isdigit() for p in parts):
+        return [int(p) for p in parts]
+    return int(v) if v.isdigit() and (v == "0" or not v.startswith("0")) else v
+
 
 def onRequest(context, request):
+    print("request url " + context.url)
     sh = {}
-    try:                                        # 1. 请求体是 JSON 就合并进来
+
+    # 1) 请求体：顶层字段平铺 + 原始结构 _body
+    try:
         body = json.loads(request.body.payload)
         if isinstance(body, dict):
             sh.update(body)
+            sh["_body"] = body
+        elif body is not None:
+            sh["_body"] = body
     except Exception:
-        pass
+        pass                                     # GET / 非 JSON body
 
-    m = re.search(r"/v2/tasks/(\d+)", str(getattr(request, "path", "") or context.url))
-    if m:                                       # 2. URL 里的 ID（子路径也能穿过）
-        sh["task_id"] = int(m.group(1))         # 必须存 int，响应里 id 是数字
+    path = str(getattr(request, "path", "") or context.url)   # 可能不含 query
+    full = str(context.url)                                   # 完整 URL，含 query
+
+    # 2) 路径段
+    segs = [s for s in path.split("?")[0].split("/") if s]
+    if segs:
+        sh["_path"] = segs
+        nums = [int(s) for s in segs if s.isdigit()]
+        if nums:
+            sh["_path_ids"] = nums
+            sh["_path_id"] = nums[0]
+            sh["_path_count"] = len(nums)
+
+    # 3) 查询参数
+    if "?" in full:
+        q, qall = {}, {}
+        for pair in full.split("?", 1)[1].split("&"):
+            if not pair:
+                continue
+            k, v = pair.split("=", 1) if "=" in pair else (pair, "")
+            qall.setdefault(k, []).append(v)
+        for k, vs in qall.items():
+            vals = [_val(x) for x in vs]
+            q[k] = vals if len(vals) > 1 else vals[0]
+        sh["_query"] = q
+        sh["_query_all"] = qall
+        sh["_query_counts"] = {k: len(vs) for k, vs in qall.items()}
+        sh["_query_count"] = sum(len(vs) for vs in qall.values())
 
     context.shared = sh
-    _print_shared(context)                      # 看合并后的完整 shared
+    _print_shared(context)
     return request
 ```
 
-几个要点：
+### 3) `shared` 里的通用键
 
-- **存 `int` 不能存 `str`**。`shared_eq` 是严格相等，`144310 != "144310"`，存成字符串会永远失败。
-- **用正则别用 `split("/")[-1]`**，否则 `/v2/tasks/144310/event_types` 会取到 `event_types`。
-- **匹配不到就不要写这个键**。写 `{"task_id": None}` 是「有键但值为空」→ 判 ❌；不写这个键才会 ℹ️ 跳过。
-- 一个脚本要同时覆盖多种接口时，各存各的键，互不影响：
+| 键 | 内容 | 典型用途 |
+| --- | --- | --- |
+| `_path` | 路径分段原样，如 `["v2","tasks","144310"]` | 需要自己切路径时 |
+| `_path_ids` | 路径里**全部**纯数字段，如 `[144310, 15608]` | `shared_key: "_path_ids.0"` 取资源 ID |
+| `_path_id` | 第一个数字段（= `_path_ids.0`） | 同上，写法短一点 |
+| `_path_count` | 数字段个数 | 判断路径里带了几个 ID |
+| `_query` | 查询参数；单值→标量、重复 key→列表，**纯数字已转 int** | `shared_key: "_query.ids"` |
+| `_query_all` | 同上但一律列表、一律**原始字符串** | 要原始形态/保留前导零时 |
+| `_query_counts` | `{参数名: 值的个数}` | `shared_key: "_query_counts.ids"` 拿「请求了几条」 |
+| `_query_count` | 所有参数值的**总个数** | 只带一类 ID 参数时可直接用 |
+| （body 顶层字段） | 平铺在根上 | `shared_key: "object_key"` 老写法继续可用 |
+| `_body` | 请求体原始结构 | `shared_key: "_body.data.object_key"` 取嵌套 |
+
+> `_query_all.ids` 是 `["129728","141076"]`（字符串），响应里的 `id` 是 `129728`（数字）。严格相等下必然不等 —— **要比就比 `_query.ids`**，它已经转成 int。
+
+### 4) 清单侧：`shared_eq`（值相等）
 
 ```python
-    for key, pat in (("task_id", r"/v2/tasks/(\d+)"),
-                     ("template_id", r"/v2/vlms/template/(\d+)")):
-        m = re.search(pat, str(getattr(request, "path", "") or context.url))
-        if m:
-            sh[key] = int(m.group(1))
-```
-
-### 3) 清单侧：`shared_eq`
-
-```python
-{"desc": "响应 id 与 URL 中的 template_id 一致", "kind": "shared_eq",
- "path": "id", "shared_key": "template_id", "require_shared": True},
+{"desc": "响应 id 与 URL 中的 ID 一致", "kind": "shared_eq",
+ "path": "id", "shared_key": "_path_ids.0", "require_shared": True},
 
 {"desc": "响应 name 与请求一致", "kind": "shared_eq", "path": "name"},      # 同名可省 shared_key
 ```
@@ -262,10 +302,26 @@ def onRequest(context, request):
 输出示例：
 
 ```
-✅ 响应 id 与 URL 中的 template_id 一致: 实际 21029 / shared 21029
+✅ 响应 id 与 URL 中的 ID 一致: 实际 144310 / shared 144310
 ❌ 响应 name 与请求一致: 实际 'old_name' / shared 'new_template_name1'
-ℹ️ 响应 id 与 URL 中的 task_id 一致: context.shared 不可用或没有 task_id，跳过
+ℹ️ 响应 id 与 URL 中的 ID 一致: context.shared 不可用或没有 _path_ids.0，跳过
 ```
+
+### 5) 清单侧：`shared_in`（值属于列表）
+
+列表接口 `?ids=129728&ids=141076` 返回多条，每条记录的 `id` 只是请求列表中的一个，用 `shared_eq` 永远不等。改用 `shared_in`：
+
+```python
+{"desc": "返回的每条 id 都属于请求的 ids", "kind": "shared_in",
+ "path": "id", "shared_key": "_query.ids"},
+```
+
+```
+✅ 返回的每条 id 都属于请求的 ids: 实际 129728
+❌ 返回的每条 id 都属于请求的 ids: 实际 999999，不在 [129728, 141076] 中
+```
+
+> ⚠️ `{"total": 2, "results": [...]}` 这种响应，`checks` 是**逐条**在每条记录上跑的，`"path": "total"` 取不到值。所以「返回条数 == 请求条数」目前做不到（需要整体级检查，引擎没有这一层）。
 
 > 常见误配：把 `path` 写成 `"shared"`、或把 `shared_key` 写成 `"shared"`。`shared_key` 要填的是 **`shared` 这个 dict 里的键名**（如 `task_id`），不是 `shared` 自己。日志里出现「没有 shared」通常就是这个原因。
 >
