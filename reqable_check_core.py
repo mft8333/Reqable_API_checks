@@ -14,9 +14,6 @@
 #                {"desc","kind","path","shared_key"}  响应取值用 path/key，shared 取值用 shared_key
 #                shared_key 省略时依次退化为 path / key；context.shared 不可用(测试脚本为 null)时
 #                打印 ℹ️ 跳过、不计失败；加 "require_shared": True 则改为判 ❌
-#   shared_in  : 响应值【属于】shared 里的列表(列表接口用：返回的每条 id 是否都在请求的 ids 里)
-#                {"desc","kind","path","shared_key"}  取键规则与 shared_eq 完全相同
-#                shared 取到的若不是列表，会自动当成单元素列表比；严格相等，注意类型
 #   for_each   : 对【数组】每个元素递归执行 "sub" 里的子检查(可再套 top_fields/list_field/for_each)；
 #                {"desc","kind","path","sub":[ ...子检查... ]}  数组为 null 或父级为 null 视为正常
 #                注意: path 必须指向数组；单个对象请用 top_fields + path
@@ -169,26 +166,6 @@ def _run_check(r, c, ctx=None):
         exists, actual = _get_value(r, c)
         ok = exists and actual == want
         print(f"{'✅' if ok else '❌'} {c['desc']}: 实际 {actual!r} / shared {want!r}")
-        return 0 if ok else 1
-
-    elif kind == "shared_in":
-        # 响应值【属于】onRequest 写入 context.shared 的列表（列表接口用：返回的每条 id 都在请求的 ids 里）
-        skey = c.get("shared_key") or c.get("path") or c.get("key")
-        sh_exists, want = _shared_value(ctx, skey)
-        if not skey:
-            print(f"⚠️ {c['desc']}: 缺少 shared_key（shared_in 需指定 shared 中的列表字段名）")
-            return 0
-        if not sh_exists:
-            if c.get("require_shared"):
-                print(f"❌ {c['desc']}: context.shared 中没有 {skey}（onRequest 未写入/未生效，或 shared 为空）")
-                return 1
-            print(f"ℹ️ {c['desc']}: context.shared 不可用或没有 {skey}，跳过")
-            return 0
-        allow = want if isinstance(want, list) else [want]
-        exists, actual = _get_value(r, c)
-        ok = exists and actual in allow
-        tail = "" if ok else f"，不在 {allow!r} 中"
-        print(f"{'✅' if ok else '❌'} {c['desc']}: 实际 {actual!r}{tail}")
         return 0 if ok else 1
 
     elif kind == "list_field":
