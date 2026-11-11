@@ -28,7 +28,6 @@
 from reqable import *
 import json
 import os
-import re                       # 只给下面「兼容写法」用；不加会 NameError: name 're' is not defined
 
 CORE = os.path.abspath(os.path.expanduser(r"~/Documents/reqable/reqable_check_core.py"))
 if not os.path.isfile(CORE):
@@ -103,12 +102,6 @@ def onRequest(context, request):
         sh["_query_all"] = qall
         sh["_query_counts"] = {k: len(vs) for k, vs in qall.items()}
         sh["_query_count"] = sum(len(vs) for vs in qall.values())
-
-    # 4) 兼容早期的正则写法：GET /v2/tasks/144310 → task_id（与 _path_ids.0 等价）
-    #    老检查项 shared_key 写 "task_id" 时不用改；要用通用写法就写 "_path_ids.0"，两者都在
-    m = re.search(r"/v2/tasks/(\d+)", path or full)
-    if m:
-        sh["task_id"] = int(m.group(1))         # 存 int：响应里的 id 是数字，存字符串比对必失败
 
     context.shared = sh
     _print_shared(context)                      # 控制台打印 shared = {...}，照着它写 shared_key

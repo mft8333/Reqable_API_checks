@@ -210,9 +210,6 @@ shared = {"name": "new_template_name1", "temperature": 0.9, "aliases": {...}}
 不写死接口名、也不猜参数名：路径段、查询参数、请求体各收一份进 `shared`，检查时按需取。规则脚本里的同名 `onRequest` 会覆盖引擎那个，所以「打印 URL + 请求体进 shared + 打印 shared」也一并写在里面，不必再调引擎那版。
 
 ```python
-import re        # 只有第 4) 段用；漏了会 NameError: name 're' is not defined
-
-
 def _val(v):
     """纯数字转 int（便于与响应里的数字比）；逗号分隔且每段都是数字转列表；其余保持字符串。"""
     parts = v.split(",")
@@ -265,11 +262,6 @@ def onRequest(context, request):
         sh["_query_counts"] = {k: len(vs) for k, vs in qall.items()}
         sh["_query_count"] = sum(len(vs) for vs in qall.values())
 
-    # 4) 兼容早期的正则写法：/v2/tasks/144310 → task_id（与 _path_ids.0 等价）
-    m = re.search(r"/v2/tasks/(\d+)", path or full)
-    if m:
-        sh["task_id"] = int(m.group(1))
-
     context.shared = sh
     _print_shared(context)
     return request
@@ -289,8 +281,6 @@ def onRequest(context, request):
 | `_query_count` | 所有参数值的**总个数** | 只带一类 ID 参数时可直接用 |
 | （body 顶层字段） | 平铺在根上 | `shared_key: "object_key"` 老写法继续可用 |
 | `_body` | 请求体原始结构 | `shared_key: "_body.data.object_key"` 取嵌套 |
-
-另外，路径匹配 `/v2/tasks/{id}` 时会额外写一个兼容键 **`task_id`**（与 `_path_ids.0` 同值），老检查项 `"shared_key": "task_id"` 不用改；新写建议用 `_path_ids.0`，因为它在 `/v2/vlms/template/21029`、`/v2/event_records/2289267` 这类接口上同样有效。
 
 > `_query_all.ids` 是 `["129728","141076"]`（字符串），响应里的 `id` 是 `129728`（数字）。严格相等下必然不等 —— **要比就比 `_query.ids`**，它已经转成 int。
 
