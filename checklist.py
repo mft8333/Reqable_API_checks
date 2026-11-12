@@ -17,9 +17,13 @@
 #   shared_in  : 响应值【属于】shared 里的列表(列表接口用：返回的每条 id 是否都在请求的 ids 里)
 #                {"desc","kind","path","shared_key"}  取键规则与 shared_eq 完全相同
 #                shared 取到的若不是列表，会自动当成单元素列表比；严格相等，注意类型
+#   sub_checks : 对【单个对象】执行 "sub" 里的多条子检查(可套 top_fields/eq/exists/list_field/for_each)；
+#                {"desc","kind","path","sub":[ ...子检查... ]}  对象为 null / 父级为 null 视为正常
+#                适用「可选对象但字段多」：一条检查打包整组，对象是 null 时整组 ℹ️ 跳过
+#                "path": "." 表示当前对象本身；对象字段整体不存在时加 null_ok: True 放行
 #   for_each   : 对【数组】每个元素递归执行 "sub" 里的子检查(可再套 top_fields/list_field/for_each)；
 #                {"desc","kind","path","sub":[ ...子检查... ]}  数组为 null 或父级为 null 视为正常
-#                注意: path 必须指向数组；单个对象请用 top_fields + path
+#                注意: path 必须指向数组；单个对象请用 sub_checks（或 top_fields + path）
 #                数组套数组时，内层写 "path": "." 表示【当前这个元素本身】(如 detected_objects)
 #                加 "null_ok": True 时，该数组字段【整体不存在】也放行(用于可选数组，如某些项没有 zones)
 # ==============================================================
@@ -46,10 +50,15 @@ checks = [
                 "event_types", "camera", "location", "cluster", "snapshot",
                 "object_size_filter", "confidence_threshold"]},
 
-    # 2) top_fields + path：嵌套单个对象（对象为 null 视为正常）
-    {"desc": "camera 必需字段", "kind": "top_fields", "path": "camera",
-     "fields": ["id", "name", "source_url", "fps", "resolution_height",
-                "resolution_width", "model_name", "coordinates", "address"]},
+    # 2) sub_checks：可选对象打包多条子检查（camera 为 null 时整组 ℹ️ 跳过）
+    {"desc": "camera", "kind": "sub_checks", "path": "camera", "sub": [
+        {"desc": "必需字段", "kind": "top_fields",
+         "fields": ["id", "name", "source_url", "fps", "resolution_height",
+                    "resolution_width", "model_name", "coordinates", "address"]},
+        {"desc": "coordinates 字段", "kind": "top_fields", "path": "coordinates",
+         "fields": ["latitude", "longitude"]},
+        {"desc": "source_url 非空", "kind": "exists", "path": "source_url"},
+    ]},
 
     # 3) eq：固定值（字符串带引号，数字不加）
     {"desc": "timezone 应为 Asia/Taipei", "kind": "eq",

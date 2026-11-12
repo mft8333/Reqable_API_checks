@@ -67,7 +67,7 @@ checks = [
 | `key` | 仅 `eq` / `exists` 的顶层字段写法 |
 | `fields` | 批量字段名列表，用于 `top_fields` / 批量 `exists` |
 | `value` | `eq` 的期望值 |
-| `sub` | `for_each` 的子检查列表，可继续嵌套 |
+| `sub` | `sub_checks` / `for_each` 的子检查列表，可继续嵌套 |
 | `shared_key` | 仅 `shared_eq` / `shared_in`：`context.shared` 里的取值路径（点分，如 `_query.ids`）；省略时退化为 `path` / `key` |
 | `require_shared` | 仅 `shared_eq` / `shared_in`：`True` 时 `shared` 里没有该字段判 ❌，否则只 ℹ️ 跳过 |
 | `null_ok` | `True` 时放行 `null` / 空串 `""`（含父级为 `null`）；在 `for_each` 上还表示「数组字段整体不存在」也放行 |
@@ -83,6 +83,7 @@ checks = [
 | `list_field` | 数组里每个元素都必须含某字段 | `path` 指向数组 |
 | `shared_eq` | 响应字段 == `onRequest` 写入 `context.shared` 的值 | 任意可寻址字段 |
 | `shared_in` | 响应字段属于 `context.shared` 里的列表（列表接口逐条校验） | 任意可寻址字段 |
+| `sub_checks` | 对单个对象执行 `sub` 里的一组子检查（可选对象打包用） | `path` 指向单个对象 |
 | `for_each` | 对数组每个元素递归执行 `sub` 里的子检查 | `path` 必须指向数组 |
 
 ### 写法示例
@@ -96,15 +97,29 @@ checks = [
             "object_size_filter", "confidence_threshold"]},
 ```
 
-**2. 嵌套单个对象 → `top_fields` + `path`**（子对象为 `null` 视为正常）
+**2. 可选单个对象 → `sub_checks`**（一个对象要查很多字段时，打包成一组；对象为 `null` 整组跳过）
 
 ```python
-{"desc": "camera 必需字段", "kind": "top_fields", "path": "camera",
- "fields": ["id", "name", "source_url", "fps", "resolution_height",
-            "resolution_width", "model_name", "coordinates", "address"]},
+{"desc": "camera", "kind": "sub_checks", "path": "camera", "sub": [
+    {"desc": "必需字段", "kind": "top_fields",
+     "fields": ["id", "name", "source_url", "fps", "resolution_height",
+                "resolution_width", "model_name", "coordinates", "address"]},
+    {"desc": "coordinates 字段", "kind": "top_fields", "path": "coordinates",
+     "fields": ["latitude", "longitude"]},
+    {"desc": "source_url 非空", "kind": "exists", "path": "source_url"},
+]},
+```
+
+`sub` 里的 `path` **从对象内部写起**（`"coordinates"` 而不是 `"camera.coordinates"`）；子检查可以是任意 kind，也能再套 `for_each`。
+
+只有一两个字段要查时，直接用 `top_fields` + `path` 更省事（效果一样，`null` 也放行）：
+
+```python
 {"desc": "camera.coordinates 的必需字段", "kind": "top_fields",
  "path": "camera.coordinates", "fields": ["latitude", "longitude"]},
 ```
+
+`sub_checks` 的三种边界：对象为 `null` → 整组 ℹ️ 跳过；字段整体不存在 → 默认 ❌，加 `null_ok: True` 放行；对象不是 dict（是数组/字符串）→ ❌ 并提示改用 `for_each`。`path` 写 `"."` 或省略表示当前对象本身。
 
 **3. 固定值断言 → `eq`（两种写法）**
 
@@ -179,6 +194,8 @@ checks = [
 | 场景 | 行为 |
 | --- | --- |
 | `top_fields` 查的子对象为 `null` / 父级为 `null` | 视为正常，不报错 |
+| `sub_checks` 指向的对象为 `null` / 父级为 `null` | 整组 ℹ️ 跳过，不计失败 |
+| `sub_checks` 指向的字段整体不存在 | 默认 ❌，`null_ok: True` 才放行 |
 | `list_field` / `for_each` 的数组为 `null` / 父级为 `null` | 视为正常 |
 | `exists` 字段值为 `null` 或 `""` | 默认**判失败**，`null_ok: True` 才放行 |
 | `exists` 字段值为 `0` / `false` / `[]` | 正常，不算空值 |
@@ -292,9 +309,10 @@ def onRequest(context, request):
 
 ```
 每条结果（顶层必需字段 12 项）
-├─ camera（单对象）         → id name source_url fps resolution_height
+├─ camera（单对象，sub_checks 整组）→ id name source_url fps resolution_height
 │                             resolution_width model_name coordinates address
-│  └─ coordinates           → latitude longitude
+│  ├─ coordinates           → latitude longitude
+│  └─ source_url            → 非 null 断言
 ├─ location（单对象）       → id name timezone organization_id coordinates
 │  └─ coordinates           → latitude longitude
 ├─ cluster（单对象）        → id name address
@@ -311,7 +329,7 @@ def onRequest(context, request):
 └─ confidence_threshold     → 非 null 断言
 
 另有：
-  camera.source_url                 → 非 null 断言
+  camera.source_url                 → 非 null 断言（在 sub_checks 内）
   location.timezone == Asia/Taipei  → eq 固定值断言
 ```
 
@@ -332,6 +350,11 @@ def onRequest(context, request):
 
 # 新增「列表逐条归属请求参数」
 {"desc": "每条 id 都属于请求的 ids", "kind": "shared_in", "path": "id", "shared_key": "_query.ids"},
+
+# 新增「可选对象打包一组子检查」
+{"desc": "cluster", "kind": "sub_checks", "path": "cluster", "sub": [
+    {"desc": "必需字段", "kind": "top_fields", "fields": ["id", "name", "address"]},
+]},
 ```
 
 `desc` 建议写清「对象 + 字段」，报错时能一眼定位。
@@ -339,7 +362,7 @@ def onRequest(context, request):
 ## 八、常见坑
 
 1. **CORE 路径**：绝对路径 + `expanduser("~")`，别用裸相对路径。
-2. **单个对象别用 `for_each`**：`camera` / `location` / `cluster` / `scheduler` 都是对象，用 `top_fields` + `path`；`for_each` 的 `path` 必须指向数组，否则会报错。
+2. **单个对象不能用 `for_each`**：`camera` / `location` / `cluster` / `scheduler` 都是对象，用 `sub_checks`（字段多、对象可空时）或 `top_fields` + `path`（字段少时）；`for_each` 的 `path` 必须指向数组，否则会报错。
 3. **数组套数组要两层 `for_each`**：`event_types` → `zones`；可选数组记得加 `null_ok: True`。
 4. **path 数组下标**：点分 + 数字下标，如 `vlms.0.x`。
 5. **`null_ok` vs `optional`**：前者放行 null / 空串值，后者放行字段整体缺失。
@@ -365,4 +388,5 @@ def onRequest(context, request):
 - **Q：字段明明有值却判失败？** 看是不是 `exists` 默认严格（null / 空串也失败）、`for_each` 指到了对象而非数组，或 `eq` 的期望值类型写错（字符串 vs 数字）。
 - **Q：`shared_eq` 一直显示「跳过」？** 先看 `onRequest` 打印的 `shared = {...}` 里有没有那个键；注意 `shared_key` 填的是键名，不是 `shared`。
 - **Q：URL 明明带了参数，`shared` 还是 `{}`？** 多半是 Reqable 里挂的引擎还是旧版（旧版 `onRequest` 只收请求体，GET 就是空）；换成当前 `reqable_check_core.py` 后 `?ids=1&ids=2` 会出现 `_query`。
+- **Q：`sub_checks` 整组显示「跳过」？** 说明那个对象是 `null`，按设计视为正常。若它本该存在，另加一条 `{"desc": "camera 必须存在", "kind": "exists", "path": "camera"}` 断言非 null。
 - **Q：想临时跳过某条规则？** 直接从 `checks` 里删掉或注释那一项。

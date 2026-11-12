@@ -17,6 +17,10 @@
 #   shared_in  : 响应值【属于】shared 里的列表(列表接口用：返回的每条 id 是否都在请求的 ids 里)
 #                {"desc","kind","path","shared_key"}  取键规则与 shared_eq 完全相同
 #                shared 取到的若不是列表，会自动当成单元素列表比；严格相等，注意类型
+#   sub_checks : 对【单个对象】执行 "sub" 里的多条子检查(可套 top_fields/eq/exists/list_field/for_each)；
+#                {"desc","kind","path","sub":[ ...子检查... ]}  对象为 null / 父级为 null 视为正常
+#                适用「可选对象但字段多」：一条检查打包整组，对象是 null 时整组 ℹ️ 跳过
+#                "path": "." 表示当前对象本身；对象字段整体不存在时加 null_ok: True 放行
 #   for_each   : 对【数组】每个元素递归执行 "sub" 里的子检查(可再套 top_fields/list_field/for_each)；
 #                {"desc","kind","path","sub":[ ...子检查... ]}  数组为 null 或父级为 null 视为正常
 #                注意: path 必须指向数组；单个对象请用 top_fields + path
@@ -247,6 +251,36 @@ def _run_check(r, c, ctx=None):
                     sc = dict(sub)                              # 不改动原配置
                     sc["desc"] = f"{c['desc']}[{j}]·{sub.get('desc', '')}"
                     fail += _run_check(item, sc, ctx)           # 递归，支持再套 top_fields/list_field/for_each
+            return fail
+
+    elif kind == "sub_checks":
+        # 单个对象跑一组子检查：对象为 null（或父级为 null）整组放行，字段缺失看 null_ok
+        if c.get("path"):
+            exists, obj = _get_value(r, c)
+        else:
+            exists, obj = True, r                             # 省略 path = 当前对象本身
+        if not exists:
+            if c.get("path") and _null_ancestor(r, c["path"]):
+                print(f"ℹ️ {c['desc']}: 父级为 null（视为正常）")
+                return 0
+            if c.get("null_ok"):
+                print(f"ℹ️ {c['desc']}: 字段不存在（null_ok 放行）")
+                return 0
+            print(f"❌ {c['desc']}: 字段 {c['path']} 不存在")
+            return 1
+        elif obj is None:
+            print(f"ℹ️ {c['desc']}: {c.get('path') or '当前对象'} 为 null（视为正常）")
+            return 0
+        elif not isinstance(obj, dict):
+            where = "当前对象" if c.get("path") in (".", "$") else c.get("path")
+            print(f"❌ {c['desc']}: {where} 类型异常: {type(obj).__name__}（sub_checks 的 path 必须指向单个对象，数组请用 for_each）")
+            return 1
+        else:
+            fail = 0
+            for sub in c["sub"]:
+                sc = dict(sub)                                # 不改动原配置
+                sc["desc"] = f"{c['desc']}·{sub.get('desc', '')}"
+                fail += _run_check(obj, sc, ctx)              # 子检查的 path 从对象内部写起
             return fail
 
     else:
