@@ -14,6 +14,9 @@
 #                {"desc","kind","path","shared_key"}  响应取值用 path/key，shared 取值用 shared_key
 #                shared_key 省略时依次退化为 path / key；context.shared 不可用(测试脚本为 null)时
 #                打印 ℹ️ 跳过、不计失败；加 "require_shared": True 则改为判 ❌
+#   shared_in  : 响应值【属于】shared 里的列表(列表接口用：返回的每条 id 是否都在请求的 ids 里)
+#                {"desc","kind","path","shared_key"}  取键规则与 shared_eq 完全相同
+#                shared 取到的若不是列表，会自动当成单元素列表比；严格相等，注意类型
 #   for_each   : 对【数组】每个元素递归执行 "sub" 里的子检查(可再套 top_fields/list_field/for_each)；
 #                {"desc","kind","path","sub":[ ...子检查... ]}  数组为 null 或父级为 null 视为正常
 #                注意: path 必须指向数组；单个对象请用 top_fields + path
@@ -168,6 +171,26 @@ def _run_check(r, c, ctx=None):
         print(f"{'✅' if ok else '❌'} {c['desc']}: 实际 {actual!r} / shared {want!r}")
         return 0 if ok else 1
 
+    elif kind == "shared_in":
+        # 响应值【属于】onRequest 写入 context.shared 的列表（列表接口用：返回的每条 id 都在请求的 ids 里）
+        skey = c.get("shared_key") or c.get("path") or c.get("key")
+        sh_exists, want = _shared_value(ctx, skey)
+        if not skey:
+            print(f"⚠️ {c['desc']}: 缺少 shared_key（shared_in 需指定 shared 中的列表字段名）")
+            return 0
+        if not sh_exists:
+            if c.get("require_shared"):
+                print(f"❌ {c['desc']}: context.shared 中没有 {skey}（onRequest 未写入/未生效，或 shared 为空）")
+                return 1
+            print(f"ℹ️ {c['desc']}: context.shared 不可用或没有 {skey}，跳过")
+            return 0
+        allow = want if isinstance(want, list) else [want]
+        exists, actual = _get_value(r, c)
+        ok = exists and actual in allow
+        tail = "" if ok else f"，不在 {allow!r} 中"
+        print(f"{'✅' if ok else '❌'} {c['desc']}: 实际 {actual!r}{tail}")
+        return 0 if ok else 1
+
     elif kind == "list_field":
         exists, arr = _get_value(r, c)          # 保留 exists，区分“字段缺失”与“值为 null”
         if not exists:
@@ -243,35 +266,53 @@ def _print_shared(context):
         print(f"shared = {sh!r}")
 
 
+def _val(v):
+    """参数值转类型：纯数字→int，逗号分隔且全数字→int 列表，其余原样。"""
+    parts = v.split(",")
+    if len(parts) > 1 and all(p.isdigit() for p in parts):
+        return [int(p) for p in parts]
+    return int(v) if v.isdigit() and (v == "0" or not v.startswith("0")) else v
+
+
 def onRequest(context, request):
-    # Print url to console
-    print('request url ' + context.url)
-    
-    # Update or add a query parameter
-    # request.queries['foo'] = 'bar'
-  
-    # Update or add a http header
-    # request.headers['foo'] = 'bar'
-  
-    # Replace http body with a text
-    # request.body = 'Hello World'
-  
-    # Map with a local file
-    # request.body.file('~/Desktop/body.json')
-  
-    # Convert to dict if the body is a JSON
-    # request.body.jsonify()
-    # Update the JSON content
-    # request.body['foo'] = 'bar'
-    
+    """收集 shared：请求体平铺 + _body，URL 查询参数 _query / _query_all。
+
+    onRequest 与 onResponse 不同进程，跨阶段只能靠 context.shared。
+    """
+    print("request url " + context.url)
+
+    sh = {}
+
+    # 1) 请求体：顶层字段平铺 + 原始结构 _body（GET 无 body 时忽略）
     try:
-        context.shared = json.loads(request.body.payload)   # 整个请求体带过去
+        body = json.loads(request.body.payload)
+        if isinstance(body, dict):
+            sh.update(body)
+            sh["_body"] = body
+        elif body is not None:
+            sh["_body"] = body
     except Exception:
-        context.shared = {}
+        pass
 
-    _print_shared(context)                                  # 打印出来，方便写测试用例
+    full = str(context.url)                                 # 完整 URL，含 query
 
-    # Done
+    # 2) 查询参数：不认参数名，全收
+    #    _query 单值→标量 / 重复 key→列表（转类型）；_query_all 一律列表、原始字符串
+    if "?" in full:
+        q, qall = {}, {}
+        for pair in full.split("?", 1)[1].split("&"):
+            if not pair:
+                continue
+            k, v = pair.split("=", 1) if "=" in pair else (pair, "")
+            qall.setdefault(k, []).append(v)
+        for k, vs in qall.items():
+            vals = [_val(x) for x in vs]
+            q[k] = vals if len(vals) > 1 else vals[0]
+        sh["_query"] = q
+        sh["_query_all"] = qall
+
+    context.shared = sh
+    _print_shared(context)                                  # 打印 shared，照它写 shared_key
     return request
 
 

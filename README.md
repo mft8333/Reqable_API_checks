@@ -16,14 +16,13 @@
 
 | 文件 | 位置 | 作用 |
 | --- | --- | --- |
-| 规则脚本（本 addon） | Reqable Addons 脚本目录 | 声明 `EXPECTED_CODE`、`checks`，加载公共引擎 |
-| `reqable_check_core.py` | `~/Documents/reqable/reqable_check_core.py` | 公共引擎：注册回调、遍历结果、输出结论 |
+| 规则脚本（本 addon） | Reqable Addons 脚本目录 | 只声明 `EXPECTED_CODE`、`checks`，加载公共引擎 |
+| `reqable_check_core.py` | `~/Documents/reqable/reqable_check_core.py` | 公共引擎：`onRequest` / `onResponse` 回调、遍历结果、输出结论 |
 
-规则脚本开头是固定写法，**路径必须用绝对路径、`~` 要展开**（Reqable 的工作目录不固定）：
+规则脚本只剩「开头固定写法 + `EXPECTED_CODE` + `checks`」三块，**路径必须用绝对路径、`~` 要展开**（Reqable 的工作目录不固定）：
 
 ```python
 from reqable import *
-import json
 import os
 
 CORE = os.path.abspath(os.path.expanduser(r"~/Documents/reqable/reqable_check_core.py"))
@@ -31,13 +30,19 @@ if not os.path.isfile(CORE):
     raise FileNotFoundError(f"公共引擎不存在: {CORE}（用 ~ 或绝对路径，别用裸相对路径）")
 
 exec(compile(open(CORE, encoding="utf-8").read(), CORE, "exec"), globals())
+
+EXPECTED_CODE = 201
+
+checks = [
+    # ...
+]
 ```
 
 `exec(..., globals())` 把引擎的函数与变量注入当前命名空间，之后定义 `checks` 即可。
 
 **期望响应码**：`EXPECTED_CODE` 默认 `200`（引擎里定义），规则脚本里写 `EXPECTED_CODE = 201` 即可覆盖。响应码不匹配时引擎直接打印 `⚠️ 响应码不是200: xxx` 并跳过检查，不会解析响应体。
 
-> ⚠️ **两个回调在不同进程**：`onRequest` 与 `onResponse` 不共享模块级变量，跨阶段取值只能走 `context.shared`（见第五节）。另外规则脚本里若定义同名 `onRequest`，**会覆盖**引擎注入的那个（后定义生效）。
+> ⚠️ **两个回调在不同进程**：`onRequest` 与 `onResponse` 不共享模块级变量，跨阶段取值只能走 `context.shared`（见第五节）。请求体、查询参数都由引擎的 `onRequest` 收集，**规则脚本一般不用再写 `onRequest`**；确实要写（例如想取 URL 路径里的 ID）时，先存一份引擎的实现再覆盖，见第五节 3)。
 
 ## 三、快速开始
 
@@ -63,8 +68,8 @@ exec(compile(open(CORE, encoding="utf-8").read(), CORE, "exec"), globals())
 | `fields` | 批量字段名列表，用于 `top_fields` / 批量 `exists` |
 | `value` | `eq` 的期望值 |
 | `sub` | `for_each` 的子检查列表，可继续嵌套 |
-| `shared_key` | 仅 `shared_eq`：`context.shared` 里的取值路径；省略时退化为 `path` / `key` |
-| `require_shared` | 仅 `shared_eq`：`True` 时 `shared` 里没有该字段判 ❌，否则只 ℹ️ 跳过 |
+| `shared_key` | 仅 `shared_eq` / `shared_in`：`context.shared` 里的取值路径（点分，如 `_query.ids`）；省略时退化为 `path` / `key` |
+| `require_shared` | 仅 `shared_eq` / `shared_in`：`True` 时 `shared` 里没有该字段判 ❌，否则只 ℹ️ 跳过 |
 | `null_ok` | `True` 时放行 `null` / 空串 `""`（含父级为 `null`）；在 `for_each` 上还表示「数组字段整体不存在」也放行 |
 | `optional` | `True` 时字段整体缺失只提示、不算失败（随类型变化的可选字段） |
 
@@ -77,6 +82,7 @@ exec(compile(open(CORE, encoding="utf-8").read(), CORE, "exec"), globals())
 | `exists` | 字段是否存在（默认严格，`null` 或 `""` 也判失败） | 单个或批量顶层字段 |
 | `list_field` | 数组里每个元素都必须含某字段 | `path` 指向数组 |
 | `shared_eq` | 响应字段 == `onRequest` 写入 `context.shared` 的值 | 任意可寻址字段 |
+| `shared_in` | 响应字段属于 `context.shared` 里的列表（列表接口逐条校验） | 任意可寻址字段 |
 | `for_each` | 对数组每个元素递归执行 `sub` 里的子检查 | `path` 必须指向数组 |
 
 ### 写法示例
@@ -156,11 +162,16 @@ exec(compile(open(CORE, encoding="utf-8").read(), CORE, "exec"), globals())
 
 数组里每个元素都必须含某字段；数组为 `null` 或父级为 `null` 视为正常。具体键名以 `reqable_check_core.py` 的实现为准。
 
-**7. 与请求参数比对 → `shared_eq`**（详见第五节）
+**7. 与请求参数比对 → `shared_eq` / `shared_in`**（详见第五节）
 
 ```python
-{"desc": "响应 id 与 URL 中的 task_id 一致", "kind": "shared_eq",
- "path": "id", "shared_key": "task_id", "require_shared": True},
+# 响应回显请求体里的字段（请求体顶层字段已平铺到 shared 根上）
+{"desc": "响应 event_type_id 与请求一致", "kind": "shared_eq",
+ "path": "event_type_id", "require_shared": True},
+
+# 列表接口：返回的每条记录 id 都属于请求 ?ids=1&ids=2
+{"desc": "每条 id 都属于请求的 ids", "kind": "shared_in",
+ "path": "id", "shared_key": "_query.ids", "require_shared": True},
 ```
 
 ### null / 缺失规则（最容易混）
@@ -178,98 +189,102 @@ exec(compile(open(CORE, encoding="utf-8").read(), CORE, "exec"), globals())
 
 ---
 
-## 五、跨请求校验：`context.shared` 与 `shared_eq`
+## 五、跨请求校验：`context.shared`
 
 ### 为什么需要
 
-Reqable 的 `onRequest` 与 `onResponse` **在两个进程里执行**，模块级变量不互通。要在响应侧拿到请求里的值（URL 路径参数、请求体字段、环境变量），必须由 `onRequest` 写进 `context.shared`，`onResponse` 再读出来。
+Reqable 的 `onRequest` 与 `onResponse` **在两个进程里执行**，模块级变量不互通。要在响应侧拿到请求里的值（请求体字段、查询参数），必须由 `onRequest` 写进 `context.shared`，`onResponse` 再读出来。
 
-### 1) 引擎默认行为：把整个请求体放进 shared
+### 1) 引擎的 `onRequest` 收集了什么
 
-```python
-    try:
-        context.shared = json.loads(request.body.payload)   # 整个请求体带过去
-    except Exception:
-        context.shared = {}
+引擎内置了通用的 `onRequest`，**规则脚本不用再写**。它不认接口名、不认参数名，挂到哪个接口上都只读不改：
 
-    _print_shared(context)      # 控制台打印 shared = {...}
+| 键 | 内容 | 例子 |
+| --- | --- | --- |
+| 请求体顶层字段 | JSON body 的每个字段平铺到 `shared` 根上 | body `{"event_type_id": 116}` → `shared["event_type_id"]` |
+| `_body` | 原始请求体结构（body 是数组、或要取嵌套字段时用） | `_body.data.object_key` |
+| `_query` | 查询参数：单值→标量、重复 key→列表、纯数字转 `int` | `?ids=1&ids=2` → `{"ids": [1, 2]}` |
+| `_query_all` | 查询参数：一律列表、一律原始字符串 | `{"ids": ["1", "2"]}` |
+
+取值规则：
+
+- 重复 key 合并成列表：`?location_ids=3&location_ids=2` → `[3, 2]`
+- 逗号分隔且每段都是数字也转列表：`?ids=1,2` → `[1, 2]`
+- 前导 0 的数字串保持字符串：`?code=007` → `"007"`
+- GET 没有 body、URL 也没有 query 时，`shared` 是 `{}`
+
+`onRequest` 会把它打印出来，照着写 `shared_key` 最省事：
+
+```
+request url https://.../observ/apiserver/v2/tasks?location_ids=3&location_ids=2
+shared = {"_query": {"location_ids": [3, 2]}, "_query_all": {"location_ids": ["3", "2"]}}
 ```
 
-`_print_shared` 的输出形如：
-
-```
-request url https://.../v2/vlms/template/21029
-shared = {"name": "new_template_name1", "temperature": 0.9, "aliases": {...}}
-```
-
-照着它写 `shared_key` 最省事。GET 请求没有 body（或 body 不是 JSON）时，`shared` 是 `{}`。
-
-### 2) 需要 URL 里的 ID 时：在规则脚本里覆盖 `onRequest`
-
-`/v2/tasks/144310` 这类路径，ID 只在 URL 里。规则脚本里定义的同名 `onRequest` 会覆盖引擎的，所以要自己把两件事都做了：
-
-```python
-import re
-
-def onRequest(context, request):
-    sh = {}
-    try:                                        # 1. 请求体是 JSON 就合并进来
-        body = json.loads(request.body.payload)
-        if isinstance(body, dict):
-            sh.update(body)
-    except Exception:
-        pass
-
-    m = re.search(r"/v2/tasks/(\d+)", str(getattr(request, "path", "") or context.url))
-    if m:                                       # 2. URL 里的 ID（子路径也能穿过）
-        sh["task_id"] = int(m.group(1))         # 必须存 int，响应里 id 是数字
-
-    context.shared = sh
-    _print_shared(context)                      # 看合并后的完整 shared
-    return request
-```
-
-几个要点：
-
-- **存 `int` 不能存 `str`**。`shared_eq` 是严格相等，`144310 != "144310"`，存成字符串会永远失败。
-- **用正则别用 `split("/")[-1]`**，否则 `/v2/tasks/144310/event_types` 会取到 `event_types`。
-- **匹配不到就不要写这个键**。写 `{"task_id": None}` 是「有键但值为空」→ 判 ❌；不写这个键才会 ℹ️ 跳过。
-- 一个脚本要同时覆盖多种接口时，各存各的键，互不影响：
-
-```python
-    for key, pat in (("task_id", r"/v2/tasks/(\d+)"),
-                     ("template_id", r"/v2/vlms/template/(\d+)")):
-        m = re.search(pat, str(getattr(request, "path", "") or context.url))
-        if m:
-            sh[key] = int(m.group(1))
-```
-
-### 3) 清单侧：`shared_eq`
-
-```python
-{"desc": "响应 id 与 URL 中的 template_id 一致", "kind": "shared_eq",
- "path": "id", "shared_key": "template_id", "require_shared": True},
-
-{"desc": "响应 name 与请求一致", "kind": "shared_eq", "path": "name"},      # 同名可省 shared_key
-```
+### 2) 清单侧：`shared_eq` / `shared_in`
 
 | 键 | 指向 |
 | --- | --- |
 | `path` / `key` | **响应**里的字段 |
-| `shared_key` | **`context.shared`** 里的字段（省略时退化为 `path` / `key`） |
+| `shared_key` | **`context.shared`** 里的取值路径（点分），省略时退化为 `path` / `key` |
 | `require_shared` | `True` 时 shared 缺该字段判 ❌，否则 ℹ️ 跳过 |
+
+- `shared_eq`：响应值 **==** shared 值（请求体回显、单值参数）
+- `shared_in`：响应值 **属于** shared 里的列表（列表接口逐条校验）
+
+```python
+# 请求体回显（顶层字段已平铺，可省略 shared_key）
+{"desc": "响应 event_type_id 与请求一致", "kind": "shared_eq",
+ "path": "event_type_id", "require_shared": True},
+
+# 嵌套请求体字段走 _body
+{"desc": "object_key 与请求一致", "kind": "shared_eq",
+ "path": "object_key", "shared_key": "_body.data.object_key"},
+
+# 列表接口：?ids=1&ids=2 返回 {"total":2,"results":[...]}，逐条判归属
+{"desc": "每条 id 都属于请求的 ids", "kind": "shared_in",
+ "path": "id", "shared_key": "_query.ids", "require_shared": True},
+```
 
 输出示例：
 
 ```
-✅ 响应 id 与 URL 中的 template_id 一致: 实际 21029 / shared 21029
-❌ 响应 name 与请求一致: 实际 'old_name' / shared 'new_template_name1'
-ℹ️ 响应 id 与 URL 中的 task_id 一致: context.shared 不可用或没有 task_id，跳过
+✅ 响应 event_type_id 与请求一致: 实际 116 / shared 116
+❌ 每条 id 都属于请求的 ids: 实际 141076，不在 [129728] 中
+ℹ️ 响应 id 与 URL 中的 ID 一致: context.shared 不可用或没有 _path_ids.0，跳过
 ```
 
-> 常见误配：把 `path` 写成 `"shared"`、或把 `shared_key` 写成 `"shared"`。`shared_key` 要填的是 **`shared` 这个 dict 里的键名**（如 `task_id`），不是 `shared` 自己。日志里出现「没有 shared」通常就是这个原因。
+> **类型要一致**：两者都是严格相等。`_query` 已把纯数字转成 `int`，响应是数字就能直接比；响应侧是字符串时改用 `_query_all`（保留原始字符串）。
 >
-> 建议给关键项加 `require_shared: True`：否则 `onRequest` 没跑到（脚本报错、请求未经过 hook）时这条会**静默跳过**，看起来通过其实没校验。
+> **常见误配**：把 `shared_key` 写成 `"shared"`。它填的是 `shared` 这个 dict 里的键名（如 `event_type_id`、`_query.ids`），不是 `shared` 本身。
+>
+> **关键项加 `require_shared: True`**：否则 `onRequest` 没跑到（脚本报错、请求没经过 hook）时这条会**静默跳过**，看起来通过其实没校验。
+
+### 3) 需要 URL 路径里的 ID 时
+
+`/v2/tasks/144310` 这类 ID 只在路径里的接口，引擎**不收集路径段**。确实要用就在规则脚本里补，注意先把引擎的 `onRequest` 存一份再覆盖：
+
+```python
+_engine_onRequest = onRequest          # 覆盖前先存住引擎的实现
+
+def onRequest(context, request):
+    request = _engine_onRequest(context, request)   # 请求体 / 查询参数照旧
+    nums = [int(s) for s in str(context.url).split("?")[0].split("/") if s.isdigit()]
+    if nums:
+        context.shared["_path_ids"] = nums          # 存 int，响应里的 id 才是数字
+        _print_shared(context)                      # 合并后再打一次
+    return request
+```
+
+清单侧：
+
+```python
+{"desc": "响应 id 与 URL 中的 ID 一致", "kind": "shared_eq",
+ "path": "id", "shared_key": "_path_ids.0", "require_shared": True},
+```
+
+- **存 `int` 不能存 `str`**：`144310 != "144310"`，存成字符串会永远失败。
+- **匹配不到就不要写这个键**：写 `{"_path_ids": None}` 是「有键但值为空」→ 判 ❌；不写才会 ℹ️ 跳过。
+- 这是通用写法（取路径里所有纯数字段），**不要写死 `/v2/tasks`、`task_id`** 这类专用路径与键名，换接口就不用改。
 
 ---
 
@@ -313,7 +328,10 @@ def onRequest(context, request):
 {"desc": "cluster.address 必须非 null", "kind": "exists", "path": "cluster.address"},
 
 # 新增「响应与请求一致」
-{"desc": "响应 device_id 与请求一致", "kind": "shared_eq", "path": "device_id"},
+{"desc": "响应 device_id 与请求一致", "kind": "shared_eq", "path": "device_id", "require_shared": True},
+
+# 新增「列表逐条归属请求参数」
+{"desc": "每条 id 都属于请求的 ids", "kind": "shared_in", "path": "id", "shared_key": "_query.ids"},
 ```
 
 `desc` 建议写清「对象 + 字段」，报错时能一眼定位。
@@ -327,7 +345,7 @@ def onRequest(context, request):
 5. **`null_ok` vs `optional`**：前者放行 null / 空串值，后者放行字段整体缺失。
 6. **`EXPECTED_CODE` 默认 200**：其它状态码（201 / 204 / 4xx）要在规则脚本里显式覆盖。
 7. **类型严格相等**：`eq` / `shared_eq` 都是 `==` 比较，`True` 与 `"True"`、`103` 与 `"103"`、`[]` 与 `"[]"` 都不相等。期望值写成 Python 字面量，别加引号。
-8. **规则脚本里写 `onRequest` 会覆盖引擎的**：引擎注入的 `onRequest` 不再生效，请求体进 `shared` 这一步要自己补。
+8. **规则脚本里写 `onRequest` 会覆盖引擎的**：引擎注入的 `onRequest` 不再生效，请求体 / 查询参数的收集要自己补。推荐先 `_engine_onRequest = onRequest` 存一份再调用（见第五节 3)。
 9. **204 没有响应体**：`EXPECTED_CODE = 204` 会因 `JSON 解析失败` 提前返回，成功场景别和 200 的清单共用一份。
 
 ### 顺带：Pydantic 422 报文的坑
@@ -346,4 +364,5 @@ def onRequest(context, request):
 - **Q：报「公共引擎不存在」？** 检查 `~/Documents/reqable/reqable_check_core.py` 是否在位、`~` 是否正确展开。
 - **Q：字段明明有值却判失败？** 看是不是 `exists` 默认严格（null / 空串也失败）、`for_each` 指到了对象而非数组，或 `eq` 的期望值类型写错（字符串 vs 数字）。
 - **Q：`shared_eq` 一直显示「跳过」？** 先看 `onRequest` 打印的 `shared = {...}` 里有没有那个键；注意 `shared_key` 填的是键名，不是 `shared`。
+- **Q：URL 明明带了参数，`shared` 还是 `{}`？** 多半是 Reqable 里挂的引擎还是旧版（旧版 `onRequest` 只收请求体，GET 就是空）；换成当前 `reqable_check_core.py` 后 `?ids=1&ids=2` 会出现 `_query`。
 - **Q：想临时跳过某条规则？** 直接从 `checks` 里删掉或注释那一项。
