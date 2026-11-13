@@ -68,7 +68,7 @@ checks = [
 | `fields` | 批量字段名列表，用于 `top_fields` / 批量 `exists` |
 | `value` | `eq` 的期望值 |
 | `sub` | `sub_checks` / `for_each` 的子检查列表，可继续嵌套 |
-| `shared_key` | 仅 `shared_eq` / `shared_in`：`context.shared` 里的取值路径（点分，如 `_query.ids`）；省略时退化为 `path` / `key` |
+| `shared_key` | 仅 `shared_eq` / `shared_in`：`context.shared` 里的取值路径（点分，如 `_query.ids`）；数组写字段名会投影成列表；省略时退化为 `path` / `key` |
 | `require_shared` | 仅 `shared_eq` / `shared_in`：`True` 时 `shared` 里没有该字段判 ❌，否则只 ℹ️ 跳过 |
 | `null_ok` | `True` 时放行 `null` / 空串 `""`（含父级为 `null`）；在 `for_each` 上还表示「数组字段整体不存在」也放行 |
 | `optional` | `True` 时字段整体缺失只提示、不算失败（随类型变化的可选字段） |
@@ -96,6 +96,14 @@ checks = [
             "event_types", "camera", "location", "cluster", "snapshot",
             "object_size_filter", "confidence_threshold"]},
 ```
+
+失败时会连带打印实际存在的键，用来判断 `path` 是否指错了对象：
+
+```
+❌ location检查·必需字段 ['timezone', 'organization_id'] 实际有: ['id', 'name', 'source_url', 'fps', ...]
+```
+
+上面这行里实际键是 `source_url` / `fps`，说明查的其实是 `camera`，`path` 该改成 `"location"`（键超过 12 个只显示前 12 个并标注总数）。
 
 **2. 可选单个对象 → `sub_checks`**（一个对象要查很多字段时，打包成一组；对象为 `null` 整组跳过）
 
@@ -260,6 +268,11 @@ shared = {"_query": {"location_ids": [3, 2]}, "_query_all": {"location_ids": ["3
 # 列表接口：?ids=1&ids=2 返回 {"total":2,"results":[...]}，逐条判归属
 {"desc": "每条 id 都属于请求的 ids", "kind": "shared_in",
  "path": "id", "shared_key": "_query.ids", "require_shared": True},
+
+# 请求体是数组：[{"event_type_id":103},{"event_type_id":206}]，取字段自动投影成列表
+{"desc": "每条 event_type_id 都属于请求", "kind": "for_each", "path": "successful", "sub": [
+    {"desc": "event_type_id 属于请求", "kind": "shared_in", "path": "event_type_id",
+     "shared_key": "_body.event_type_id", "require_shared": True}]},
 ```
 
 输出示例：
@@ -275,6 +288,8 @@ shared = {"_query": {"location_ids": [3, 2]}, "_query_all": {"location_ids": ["3
 > **常见误配**：把 `shared_key` 写成 `"shared"`。它填的是 `shared` 这个 dict 里的键名（如 `event_type_id`、`_query.ids`），不是 `shared` 本身。
 >
 > **关键项加 `require_shared: True`**：否则 `onRequest` 没跑到（脚本报错、请求没经过 hook）时这条会**静默跳过**，看起来通过其实没校验。
+>
+> **数组不用手写 `onRequest`**：`path` / `shared_key` 遇到数组时，写数字是下标（`_body.0.task_id` → `144838`），写字段名则**投影成列表**（`_body.event_type_id` → `[103, 206]`）。投影要求每项都是对象且都有该字段，有元素缺字段就算取不到，不会返回残缺列表去比对。
 
 ### 3) 需要 URL 路径里的 ID 时
 
@@ -370,6 +385,8 @@ def onRequest(context, request):
 7. **类型严格相等**：`eq` / `shared_eq` 都是 `==` 比较，`True` 与 `"True"`、`103` 与 `"103"`、`[]` 与 `"[]"` 都不相等。期望值写成 Python 字面量，别加引号。
 8. **规则脚本里写 `onRequest` 会覆盖引擎的**：引擎注入的 `onRequest` 不再生效，请求体 / 查询参数的收集要自己补。推荐先 `_engine_onRequest = onRequest` 存一份再调用（见第五节 3)。
 9. **204 没有响应体**：`EXPECTED_CODE = 204` 会因 `JSON 解析失败` 提前返回，成功场景别和 200 的清单共用一份。
+10. **数组元素不是对象时别用 `for_each`**：同一个 `event_types`，详情接口返回对象数组，列表接口可能只返回 ID 数组（`[168, 169]`）。对 ID 数组跑 `for_each`，每个元素都会报「数组元素是 int，不是对象」。先确认响应结构，ID 数组只需 `exists` 或 `top_fields`。
+11. **配置写错不会中断整轮检查**：每条检查单独兜底，`list_field` 漏 `field`、`top_fields` 漏 `fields` 会打 `⚠️ ... 跳过`，其它异常打 `❌ ... 检查执行异常`，后面的检查照常执行。
 
 ### 顺带：Pydantic 422 报文的坑
 
@@ -385,7 +402,7 @@ def onRequest(context, request):
 - **改规则不动引擎**：`reqable_check_core.py` 被多个规则脚本共用，升级前先做回归。
 - **可选字段用 `optional`**：随 `event_type` 变化的字段（`frequency`、`zones` 等）别写成必需。
 - **Q：报「公共引擎不存在」？** 检查 `~/Documents/reqable/reqable_check_core.py` 是否在位、`~` 是否正确展开。
-- **Q：字段明明有值却判失败？** 看是不是 `exists` 默认严格（null / 空串也失败）、`for_each` 指到了对象而非数组，或 `eq` 的期望值类型写错（字符串 vs 数字）。
+- **Q：字段明明有值却判失败？** 看是不是 `exists` 默认严格（null / 空串也失败）、`for_each` 指到了对象而非数组，或 `eq` 的期望值类型写错（字符串 vs 数字）。`top_fields` 报缺失时看行尾的「实际有」列表——键名对不上就是 `path` 指错了对象（复制别的检查忘改）。
 - **Q：`shared_eq` 一直显示「跳过」？** 先看 `onRequest` 打印的 `shared = {...}` 里有没有那个键；注意 `shared_key` 填的是键名，不是 `shared`。
 - **Q：URL 明明带了参数，`shared` 还是 `{}`？** 多半是 Reqable 里挂的引擎还是旧版（旧版 `onRequest` 只收请求体，GET 就是空）；换成当前 `reqable_check_core.py` 后 `?ids=1&ids=2` 会出现 `_query`。
 - **Q：`sub_checks` 整组显示「跳过」？** 说明那个对象是 `null`，按设计视为正常。若它本该存在，另加一条 `{"desc": "camera 必须存在", "kind": "exists", "path": "camera"}` 断言非 null。

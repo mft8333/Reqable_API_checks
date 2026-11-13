@@ -26,6 +26,8 @@
 #                注意: path 必须指向数组；单个对象请用 top_fields + path
 #                数组套数组时，内层写 "path": "." 表示【当前这个元素本身】(如 detected_objects)
 #                加 "null_ok": True 时，该数组字段【整体不存在】也放行(用于可选数组，如某些项没有 zones)
+# 通用: path / shared_key 遇到数组时，写数字是下标(vlms.0.x)，写字段名则投影成列表
+#       (如 _body.event_type_id → [103, 206]，要求每项都有该字段)
 # ==============================================================
 
 from reqable import *
@@ -37,16 +39,24 @@ EXPECTED_CODE = 200
 def _get_nested(obj, path):
     """按点分路径取值，支持穿过数组(下标)；返回 (是否存在, 值)。
     path 为 "." 或 "$" 时表示【当前对象本身】(数组套数组时内层用)。
+    数组 + 非下标键 → 投影成「每项该字段」的列表(如 _body.event_type_id → [103, 206])；
+    有元素缺该字段时视为取不到，避免拿到残缺列表还判通过。
     """
     if path in (".", "$"):
         return True, obj
     cur = obj
     for k in path.split("."):
         if isinstance(cur, list):
-            try:
-                cur = cur[int(k)]
-            except (ValueError, IndexError, TypeError):
+            if k.isdigit() or (k.startswith("-") and k[1:].isdigit()):
+                try:
+                    cur = cur[int(k)]
+                except (IndexError, TypeError):
+                    return False, None
+                else:
+                    continue
+            if not cur or not all(isinstance(x, dict) and k in x for x in cur):
                 return False, None
+            cur = [x[k] for x in cur]
         elif isinstance(cur, dict) and k in cur:
             cur = cur[k]
         else:
@@ -72,10 +82,12 @@ def _is_empty(v):
 
 
 def _get_value(obj, c):
-    """按 key(顶层) 或 path(嵌套) 取值。"""
+    """按 key(顶层) 或 path(嵌套) 取值。两者都没写时返回 (False, None)，避免 KeyError 打断整轮检查。"""
     if "path" in c:
         return _get_nested(obj, c["path"])
-    return (True, obj[c["key"]]) if c["key"] in obj else (False, None)
+    if "key" in c and isinstance(obj, dict):
+        return (True, obj[c["key"]]) if c["key"] in obj else (False, None)
+    return False, None
 
 
 def _shared_value(ctx, key):
@@ -95,6 +107,9 @@ def _run_check(r, c, ctx=None):
     kind = c["kind"]
 
     if kind == "top_fields":
+        if "fields" not in c:
+            print(f"⚠️ {c['desc']}: top_fields 缺少 fields，跳过")
+            return 0
         target = r
         if c.get("path"):                       # 指定了 path：先定位到那个子对象
             exists, target = _get_value(r, c)
@@ -107,13 +122,19 @@ def _run_check(r, c, ctx=None):
             if target is None:
                 print(f"ℹ️ {c['desc']}: {c['path']} 为 null（视为正常）")
                 return 0
-            if not isinstance(target, dict):
-                print(f"❌ {c['desc']}: {c['path']} 类型异常: {type(target).__name__}")
-                return 1
+        if not isinstance(target, dict):         # 无 path 时也要挡：for_each 的元素可能是数字/字符串
+            where = f"{c['path']} " if c.get("path") else "当前对象"
+            print(f"❌ {c['desc']}: {where}不是对象，实际是 {type(target).__name__}（字段检查需要对象）")
+            return 1
         missing = [f for f in c["fields"] if f not in target]
-        ok = not missing
-        print(f"{'✅' if ok else '❌'} {c['desc']}{' ' + str(missing) if missing else ''}")
-        return 0 if ok else 1
+        if not missing:
+            print(f"✅ {c['desc']}")
+            return 0
+        have = list(target)                                 # 失败时带上实际键名，便于发现 path 指错了对象
+        if len(have) > 12:
+            have = have[:12] + [f"...共{len(target)}个"]
+        print(f"❌ {c['desc']} {missing} 实际有: {have}")
+        return 1
 
     elif kind == "eq":
         exists, actual = _get_value(r, c)
@@ -124,6 +145,9 @@ def _run_check(r, c, ctx=None):
     # ★新增：批量 exists（一次校验多个顶层字段；optional=True 时缺失放行，null_ok 时 null/"" 放行）
     elif kind == "exists" and "fields" in c:
         # 批量：optional 管“字段缺失”，null_ok 管“值为 null 或空串”
+        if not isinstance(r, dict):
+            print(f"❌ {c['desc']}: 当前对象不是对象，实际是 {type(r).__name__}（批量 exists 需要对象）")
+            return 1
         bad, missing = [], []
         for f in c["fields"]:
             if f not in r:
@@ -191,11 +215,17 @@ def _run_check(r, c, ctx=None):
         allow = want if isinstance(want, list) else [want]
         exists, actual = _get_value(r, c)
         ok = exists and actual in allow
-        tail = "" if ok else f"，不在 {allow!r} 中"
+        tail = "" if ok else f"，不在请求消息 {allow!r} 中"
         print(f"{'✅' if ok else '❌'} {c['desc']}: 实际 {actual!r}{tail}")
         return 0 if ok else 1
 
     elif kind == "list_field":
+        if "field" not in c:
+            print(f"⚠️ {c['desc']}: list_field 需要 field（单个字段名，不是 fields），跳过")
+            return 0
+        if "path" not in c and "key" not in c:
+            print(f"⚠️ {c['desc']}: list_field 需要 path（指向数组），跳过")
+            return 0
         exists, arr = _get_value(r, c)          # 保留 exists，区分“字段缺失”与“值为 null”
         if not exists:
             if "path" in c and _null_ancestor(r, c["path"]):
@@ -204,13 +234,13 @@ def _run_check(r, c, ctx=None):
             if c.get("null_ok"):
                 print(f"ℹ️ {c['desc']}: 字段不存在（null_ok 放行）")
                 return 0
-            print(f"❌ {c['desc']}: 字段 {c['path']} 不存在")
+            print(f"❌ {c['desc']}: 字段 {c.get('path') or c.get('key')} 不存在")
             return 1
         elif arr is None:
-            print(f"ℹ️ {c['desc']}: {c['path']} 为 null（视为正常）")
+            print(f"ℹ️ {c['desc']}: {c.get('path') or c.get('key')} 为 null（视为正常）")
             return 0
         elif not isinstance(arr, list):
-            print(f"❌ {c['desc']}: {c['path']} 类型异常: {type(arr).__name__}")
+            print(f"❌ {c['desc']}: {c.get('path') or c.get('key')} 类型异常: {type(arr).__name__}")
             return 1
         elif not arr:
             print(f"✅ {c['desc']}: 数组为空（通过）")
@@ -232,22 +262,31 @@ def _run_check(r, c, ctx=None):
             if c.get("null_ok"):
                 print(f"ℹ️ {c['desc']}: 字段不存在（null_ok 放行）")
                 return 0
-            print(f"❌ {c['desc']}: 字段 {c['path']} 不存在")
+            print(f"❌ {c['desc']}: 字段 {c.get('path') or c.get('key')} 不存在")
             return 1
         elif arr is None:
-            print(f"ℹ️ {c['desc']}: {c['path']} 为 null（视为正常）")
+            print(f"ℹ️ {c['desc']}: {c.get('path') or c.get('key')} 为 null（视为正常）")
             return 0
         elif not isinstance(arr, list):
-            where = "当前对象" if c.get("path") in (".", "$") else c["path"]
+            where = "当前对象" if c.get("path") in (".", "$") else (c.get("path") or c.get("key"))
             print(f"❌ {c['desc']}: {where} 类型异常: {type(arr).__name__}（for_each 的 path 必须指向数组，单个对象请用 top_fields + path）")
             return 1
         elif not arr:
             print(f"✅ {c['desc']}: 数组为空（通过）")
             return 0
         else:
+            subs = c.get("sub") or []
+            if not subs:
+                print(f"⚠️ {c['desc']}: for_each 缺少 sub，跳过")
+                return 0
             fail = 0
             for j, item in enumerate(arr):
-                for sub in c["sub"]:
+                if not isinstance(item, dict):          # 元素是数字/字符串时不再往下传，报一条就够
+                    print(f"❌ {c['desc']}[{j}]: 数组元素是 {type(item).__name__}，不是对象"
+                          f"（ID 数组不能逐项查字段，去掉这条 for_each 或改用 exists）")
+                    fail += 1
+                    continue
+                for sub in subs:
                     sc = dict(sub)                              # 不改动原配置
                     sc["desc"] = f"{c['desc']}[{j}]·{sub.get('desc', '')}"
                     fail += _run_check(item, sc, ctx)           # 递归，支持再套 top_fields/list_field/for_each
@@ -287,6 +326,9 @@ def _run_check(r, c, ctx=None):
         print(f"⚠️ 未知检查类型: {kind}")
         return 0
 
+
+
+_AUTO_PRINT_SHARED = True       # 清单里设 False 可关掉 onRequest 的自动打印（自行补键后只打一行）
 
 
 def _print_shared(context):
@@ -346,7 +388,8 @@ def onRequest(context, request):
         sh["_query_all"] = qall
 
     context.shared = sh
-    _print_shared(context)                                  # 打印 shared，照它写 shared_key
+    if _AUTO_PRINT_SHARED:
+        _print_shared(context)                              # 打印 shared，照它写 shared_key
     return request
 
 
@@ -380,10 +423,14 @@ def onResponse(context, response):
 
     fail = 0
     for i, r in enumerate(records):
-        name = r.get("name") or r.get("event_name") or f"<item-{i}>"
-        print(f"—— 检查 [{i}] {name} ——")
+        name = (r.get("name") or r.get("event_name")) if isinstance(r, dict) else None
+        print(f"—— 检查 [{i}] {name or f'<item-{i}>'} ——")
         for c in checks:
-            fail += _run_check(r, c, context)
+            try:
+                fail += _run_check(r, c, context)
+            except Exception as e:                  # 单条配置写错不该中断整轮检查
+                print(f"❌ {c.get('desc', c.get('kind', '?'))}: 检查执行异常 {type(e).__name__}: {e}")
+                fail += 1
         print()
     print(f"✅ Response成功！响应码预期是{EXPECTED_CODE}: 实际结果{response.code}，CheckList检查完成，失败项: {fail}")
     return response
