@@ -17,6 +17,7 @@
 #   shared_in  : 响应值【属于】shared 里的列表(列表接口用：返回的每条 id 是否都在请求的 ids 里)
 #                {"desc","kind","path","shared_key"}  取键规则与 shared_eq 完全相同
 #                shared 取到的若不是列表，会自动当成单元素列表比；严格相等，注意类型
+#                path 取到的是数组时，要求【每个元素都属于】请求(如 detail.task_ids vs _body.task_id)
 #   sub_checks : 对【单个对象】执行 "sub" 里的多条子检查(可套 top_fields/eq/exists/list_field/for_each)；
 #                {"desc","kind","path","sub":[ ...子检查... ]}  对象为 null / 父级为 null 视为正常
 #                适用「可选对象但字段多」：一条检查打包整组，对象是 null 时整组 ℹ️ 跳过
@@ -28,6 +29,7 @@
 #                加 "null_ok": True 时，该数组字段【整体不存在】也放行(用于可选数组，如某些项没有 zones)
 # 通用: path / shared_key 遇到数组时，写数字是下标(vlms.0.x)，写字段名则投影成列表
 #       (如 _body.event_type_id → [103, 206]，要求每项都有该字段)
+#       写了不属于该 kind 的键(如 exists 里塞 sub)会打 ⚠️，这些键不生效
 # ==============================================================
 
 from reqable import *
@@ -81,6 +83,13 @@ def _is_empty(v):
     return v is None or v == ""
 
 
+def _brief(v, n=3):
+    """列表超过 n 项时只显示前 n 项，避免一条检查刷屏。"""
+    if isinstance(v, list) and len(v) > n:
+        return v[:n] + [f"...共{len(v)}个"]
+    return v
+
+
 def _get_value(obj, c):
     """按 key(顶层) 或 path(嵌套) 取值。两者都没写时返回 (False, None)，避免 KeyError 打断整轮检查。"""
     if "path" in c:
@@ -100,11 +109,30 @@ def _shared_value(ctx, key):
     return _get_nested(sh, key)
 
 
+# 每种 kind 允许的键（用于提示「写了不支持的键」）
+_COMMON_KEYS = {"desc", "kind", "path", "key"}
+_KIND_KEYS = {
+    "top_fields": {"fields"},
+    "eq": {"value"},
+    "exists": {"fields", "null_ok", "optional"},
+    "list_field": {"field"},
+    "for_each": {"sub", "null_ok"},
+    "sub_checks": {"sub", "null_ok"},
+    "shared_eq": {"shared_key", "require_shared"},
+    "shared_in": {"shared_key", "require_shared"},
+}
+
+
 def _run_check(r, c, ctx=None):
     """执行单条检查并打印，返回本条贡献的失败数(0 或 >=1)。可被 for_each 递归调用。
     ctx 仅供 shared_eq 读取 context.shared；不传则该项自动跳过（兼容旧调用）。
     """
     kind = c["kind"]
+
+    # 写了不属于该 kind 的键（比如 exists 里塞 sub）会被静默忽略 → 这条等于没检查，先提示出来
+    extra = [k for k in c if k not in _COMMON_KEYS and k not in _KIND_KEYS.get(kind, set())]
+    if extra:
+        print(f"⚠️ {c['desc']}: kind={kind} 不支持 {extra}，这些键被忽略（这条可能没在检查你以为的内容）")
 
     if kind == "top_fields":
         if "fields" not in c:
@@ -214,6 +242,18 @@ def _run_check(r, c, ctx=None):
             return 0
         allow = want if isinstance(want, list) else [want]
         exists, actual = _get_value(r, c)
+        if not exists:
+            where = c.get("path") or c.get("key") or "?"
+            print(f"❌ {c['desc']}: 取不到 {where}（字段不存在或路径写错）")
+            return 1
+        if isinstance(actual, list):                # 响应侧也是数组：要求每个元素都属于请求
+            bad = [x for x in actual if x not in allow]
+            ok = not bad
+            if ok:
+                print(f"✅ {c['desc']}: 实际 {_brief(actual)}，{len(actual)} 项都属于请求")
+            else:
+                print(f"❌ {c['desc']}: 实际 {_brief(actual)}，其中 {_brief(bad)} 不在请求消息 {_brief(allow)} 中")
+            return 0 if ok else 1
         ok = exists and actual in allow
         tail = "" if ok else f"，不在请求消息 {allow!r} 中"
         print(f"{'✅' if ok else '❌'} {c['desc']}: 实际 {actual!r}{tail}")

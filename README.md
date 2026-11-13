@@ -73,6 +73,8 @@ checks = [
 | `null_ok` | `True` 时放行 `null` / 空串 `""`（含父级为 `null`）；在 `for_each` 上还表示「数组字段整体不存在」也放行 |
 | `optional` | `True` 时字段整体缺失只提示、不算失败（随类型变化的可选字段） |
 
+> 每个 `kind` 只认自己的键。写了它不支持的键（例如给 `exists` 塞 `sub`）不会报错，但那个键**不生效**，引擎会打一行 `⚠️ kind=exists 不支持 ['sub']，这些键被忽略`——看到这个提示说明这条多半没在检查你以为的内容。
+
 ### `kind` 一览
 
 | kind | 用途 | 对象要求 |
@@ -82,7 +84,7 @@ checks = [
 | `exists` | 字段是否存在（默认严格，`null` 或 `""` 也判失败） | 单个或批量顶层字段 |
 | `list_field` | 数组里每个元素都必须含某字段 | `path` 指向数组 |
 | `shared_eq` | 响应字段 == `onRequest` 写入 `context.shared` 的值 | 任意可寻址字段 |
-| `shared_in` | 响应字段属于 `context.shared` 里的列表（列表接口逐条校验） | 任意可寻址字段 |
+| `shared_in` | 响应字段属于 `context.shared` 里的列表（列表接口逐条校验）；响应字段本身是数组时，要求每个元素都属于 | 任意可寻址字段 / 数组 |
 | `sub_checks` | 对单个对象执行 `sub` 里的一组子检查（可选对象打包用） | `path` 指向单个对象 |
 | `for_each` | 对数组每个元素递归执行 `sub` 里的子检查 | `path` 必须指向数组 |
 
@@ -254,7 +256,7 @@ shared = {"_query": {"location_ids": [3, 2]}, "_query_all": {"location_ids": ["3
 | `require_shared` | `True` 时 shared 缺该字段判 ❌，否则 ℹ️ 跳过 |
 
 - `shared_eq`：响应值 **==** shared 值（请求体回显、单值参数）
-- `shared_in`：响应值 **属于** shared 里的列表（列表接口逐条校验）
+- `shared_in`：响应值 **属于** shared 里的列表（列表接口逐条校验）；响应值是数组时，要求**每个元素都属于**，有一个不在就判 ❌（如 `detail.task_ids` vs 请求的 `ids`）
 
 ```python
 # 请求体回显（顶层字段已平铺，可省略 shared_key）
@@ -273,6 +275,10 @@ shared = {"_query": {"location_ids": [3, 2]}, "_query_all": {"location_ids": ["3
 {"desc": "每条 event_type_id 都属于请求", "kind": "for_each", "path": "successful", "sub": [
     {"desc": "event_type_id 属于请求", "kind": "shared_in", "path": "event_type_id",
      "shared_key": "_body.event_type_id", "require_shared": True}]},
+
+# 响应字段本身是数组：detail.task_ids = [144310, 144311] 对 ?ids=144310，逐个判归属
+{"desc": "每条 task_id 都属于请求", "kind": "shared_in",
+ "path": "detail.task_ids", "shared_key": "_query.ids", "require_shared": True},
 ```
 
 输出示例：
@@ -280,6 +286,9 @@ shared = {"_query": {"location_ids": [3, 2]}, "_query_all": {"location_ids": ["3
 ```
 ✅ 响应 event_type_id 与请求一致: 实际 116 / shared 116
 ❌ 每条 id 都属于请求的 ids: 实际 141076，不在 [129728] 中
+✅ 每条 task_id 都属于请求: 实际 [144310]，1 项都属于请求
+❌ 每条 task_id 都属于请求: 实际 [144310, 144311]，其中 [144311] 不在请求消息 [144310] 中
+❌ 每条 task_id 都属于请求: 取不到 detail.task_idsss（字段不存在或路径写错）
 ℹ️ 响应 id 与 URL 中的 ID 一致: context.shared 不可用或没有 _path_ids.0，跳过
 ```
 
@@ -387,6 +396,7 @@ def onRequest(context, request):
 9. **204 没有响应体**：`EXPECTED_CODE = 204` 会因 `JSON 解析失败` 提前返回，成功场景别和 200 的清单共用一份。
 10. **数组元素不是对象时别用 `for_each`**：同一个 `event_types`，详情接口返回对象数组，列表接口可能只返回 ID 数组（`[168, 169]`）。对 ID 数组跑 `for_each`，每个元素都会报「数组元素是 int，不是对象」。先确认响应结构，ID 数组只需 `exists` 或 `top_fields`。
 11. **配置写错不会中断整轮检查**：每条检查单独兜底，`list_field` 漏 `field`、`top_fields` 漏 `fields` 会打 `⚠️ ... 跳过`，其它异常打 `❌ ... 检查执行异常`，后面的检查照常执行。
+12. **写错键名不会报错、只会「永远通过」**：`exists` 里写 `sub`、`shared_in` 写成 `shared` 之类的键，引擎不认就直接忽略。现在会打 `⚠️ kind=xxx 不支持 [...]`，看到就改；`shared_in` / `shared_eq` 取不到路径时也会明确打 `❌ ... 取不到 xxx（字段不存在或路径写错）`，不再静默通过。
 
 ### 顺带：Pydantic 422 报文的坑
 
