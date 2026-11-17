@@ -19,7 +19,7 @@
 | 规则脚本（本 addon） | Reqable Addons 脚本目录 | 只声明 `EXPECTED_CODE`、`checks`，加载公共引擎 |
 | `reqable_check_core.py` | `~/Documents/reqable/reqable_check_core.py` | 公共引擎：`onRequest` / `onResponse` 回调、遍历结果、输出结论 |
 
-规则脚本只剩「开头固定写法 + `EXPECTED_CODE` + `checks`」三块，**路径必须用绝对路径、`~` 要展开**（Reqable 的工作目录不固定）：
+规则脚本只剩「开头固定写法 + `EXPECTED_CODE` + `checks`」三块（整体级断言再加一个可选的 `META_CHECKS`），**路径必须用绝对路径、`~` 要展开**（Reqable 的工作目录不固定）：
 
 ```python
 from reqable import *
@@ -32,6 +32,7 @@ if not os.path.isfile(CORE):
 exec(compile(open(CORE, encoding="utf-8").read(), CORE, "exec"), globals())
 
 EXPECTED_CODE = 201
+META_CHECKS = []        # 整体级：只跑一次、对象是整个响应 data（分页 page/size/total 用）；不写也行
 
 checks = [
     # ...
@@ -214,6 +215,40 @@ checks = [
 
 一句话：`null_ok` 管「值是 null / 空串」，`optional` 管「字段压根没有」。
 
+### 整体级检查：`META_CHECKS`（分页 `page` / `size` / `total`）
+
+`checks` 是**每条记录跑一遍**，所以分页信封上的 `page` / `size` / `total_pages` / `total` 它取不到。这类字段写进 `META_CHECKS`：**只跑一次、对象是整个响应 `data`**，`kind` 语法与 `checks` 完全一样。
+
+```python
+# 引擎里默认 META_CHECKS = []，规则脚本里覆盖即可
+META_CHECKS = [
+    {"desc": "分页字段齐全", "kind": "top_fields", "fields": ["page", "size", "total_pages", "total"]},
+    {"desc": "page 从 1 开始", "kind": "eq", "path": "page", "value": 1},
+    {"desc": "size 为 5", "kind": "eq", "path": "size", "value": 5},
+]
+```
+
+输出排在逐条检查之后、总结之前：
+
+```
+✅ 请求成功: page=1, total=2, size=5, 返回 2 条
+
+—— 检查 [0] 事件记录 ——
+...
+—— 检查 [整体] ——
+✅ 分页字段齐全
+✅ page 从 1 开始: 实际 1 / 期望 1
+❌ size 为 5: 实际 10 / 期望 5
+
+✅ Response成功！响应码预期是200: 实际结果200，CheckList检查完成，失败项: 1
+```
+
+三条注意事项：
+
+- **不写 `META_CHECKS` 完全没问题**：引擎按 `globals().get("META_CHECKS") or []` 取，未定义、`[]`、`None` 都当空——不报错，也不多打印一行。
+- **`path` 从 `data` 顶层写起**：`total` / `page` 直接写字段名，别写 `results.0.xxx`；`results` 里逐条的字段仍归 `checks`。
+- **末页 `size` ≠ 实际条数**：`size=5` 只回 1 条很正常，别断言 `len(results) == size`；`eq` 只比常量，也做不了 `total == len(results)` 这种动态对比，真要算就在规则脚本里自己算好常量再写。
+
 ---
 
 ## 五、跨请求校验：`context.shared`
@@ -232,6 +267,7 @@ Reqable 的 `onRequest` 与 `onResponse` **在两个进程里执行**，模块�
 | `_body` | 原始请求体结构（body 是数组、或要取嵌套字段时用） | `_body.data.object_key` |
 | `_query` | 查询参数：单值→标量、重复 key→列表、纯数字转 `int` | `?ids=1&ids=2` → `{"ids": [1, 2]}` |
 | `_query_all` | 查询参数：一律列表、一律原始字符串 | `{"ids": ["1", "2"]}` |
+| 路径末两段 | 末段是 ID 时，倒数第二段当键、末段当值（详见 3)） | `/v2/events/record/xxxxxx` → `{"record": xxxxxx}` |
 
 取值规则：
 
@@ -289,7 +325,7 @@ shared = {"_query": {"location_ids": [3, 2]}, "_query_all": {"location_ids": ["3
 ✅ 每条 task_id 都属于请求: 实际 [144310]，1 项都属于请求
 ❌ 每条 task_id 都属于请求: 实际 [144310, 144311]，其中 [144311] 不在请求消息 [144310] 中
 ❌ 每条 task_id 都属于请求: 取不到 detail.task_idsss（字段不存在或路径写错）
-ℹ️ 响应 id 与 URL 中的 ID 一致: context.shared 不可用或没有 _path_ids.0，跳过
+ℹ️ 响应 id 与 URL 中的 ID 一致: context.shared 不可用或没有 record，跳过
 ```
 
 > **类型要一致**：两者都是严格相等。`_query` 已把纯数字转成 `int`，响应是数字就能直接比；响应侧是字符串时改用 `_query_all`（保留原始字符串）。
@@ -300,15 +336,34 @@ shared = {"_query": {"location_ids": [3, 2]}, "_query_all": {"location_ids": ["3
 >
 > **数组不用手写 `onRequest`**：`path` / `shared_key` 遇到数组时，写数字是下标（`_body.0.task_id` → `144838`），写字段名则**投影成列表**（`_body.event_type_id` → `[103, 206]`）。投影要求每项都是对象且都有该字段，有元素缺字段就算取不到，不会返回残缺列表去比对。
 
-### 3) 需要 URL 路径里的 ID 时
+### 3) URL 路径里的 ID
 
-`/v2/tasks/144310` 这类 ID 只在路径里的接口，引擎**不收集路径段**。确实要用就在规则脚本里补，注意先把引擎的 `onRequest` 存一份再覆盖：
+引擎已经自动收了：取路径**末两段**当「键 = 值」，末段是纯数字（转 `int`）或 UUID（保留原始字符串）才写入，键名就是倒数第二段：
+
+```
+request url https://.../v2/events/record/xxxxxx
+shared = {"record": xxxxxx}
+```
+
+清单侧直接用那段的名字：
+
+```python
+{"desc": "响应 id 与 URL 中的 ID 一致", "kind": "shared_eq",
+ "path": "id", "shared_key": "record", "require_shared": True},
+```
+
+四条规则：
+
+- **末段不像 ID 就不收**：`/tasks/batch-task/update_type` 这种尾巴是动作名，`shared` 保持原样，不会塞进垃圾键。
+- **键名要纯字母**：`v2` 这类带数字的段不当键名。
+- **和请求体字段重名时以请求体为准**：`/clusters/7` + body `{"clusters": [7]}`，`shared["clusters"]` 是 body 的值，路径值不覆盖。
+- **只在 ID 位于末段时有效**：`/record/{id}/objects` 这类 ID 在中间、或想一次取多个段，自己补 `onRequest`：
 
 ```python
 _engine_onRequest = onRequest          # 覆盖前先存住引擎的实现
 
 def onRequest(context, request):
-    request = _engine_onRequest(context, request)   # 请求体 / 查询参数照旧
+    request = _engine_onRequest(context, request)   # 请求体 / 查询参数 / 末两段照旧
     nums = [int(s) for s in str(context.url).split("?")[0].split("/") if s.isdigit()]
     if nums:
         context.shared["_path_ids"] = nums          # 存 int，响应里的 id 才是数字
@@ -325,7 +380,9 @@ def onRequest(context, request):
 
 - **存 `int` 不能存 `str`**：`144310 != "144310"`，存成字符串会永远失败。
 - **匹配不到就不要写这个键**：写 `{"_path_ids": None}` 是「有键但值为空」→ 判 ❌；不写才会 ℹ️ 跳过。
-- 这是通用写法（取路径里所有纯数字段），**不要写死 `/v2/tasks`、`task_id`** 这类专用路径与键名，换接口就不用改。
+- 自定义部分同样是通用写法（取路径里所有纯数字段），**不要写死 `/v2/tasks`、`task_id`** 这类专用路径与键名。
+- 这里的 `_path_ids`、`_path_id` 都是**自己起的键名**，引擎不产生，纯自定义；引擎只产生路径**末两段**那一对
+  `<倒数第二段>: <末段值>`（如 `record` / `tasks`）。
 
 ---
 
@@ -397,6 +454,7 @@ def onRequest(context, request):
 10. **数组元素不是对象时别用 `for_each`**：同一个 `event_types`，详情接口返回对象数组，列表接口可能只返回 ID 数组（`[168, 169]`）。对 ID 数组跑 `for_each`，每个元素都会报「数组元素是 int，不是对象」。先确认响应结构，ID 数组只需 `exists` 或 `top_fields`。
 11. **配置写错不会中断整轮检查**：每条检查单独兜底，`list_field` 漏 `field`、`top_fields` 漏 `fields` 会打 `⚠️ ... 跳过`，其它异常打 `❌ ... 检查执行异常`，后面的检查照常执行。
 12. **写错键名不会报错、只会「永远通过」**：`exists` 里写 `sub`、`shared_in` 写成 `shared` 之类的键，引擎不认就直接忽略。现在会打 `⚠️ kind=xxx 不支持 [...]`，看到就改；`shared_in` / `shared_eq` 取不到路径时也会明确打 `❌ ... 取不到 xxx（字段不存在或路径写错）`，不再静默通过。
+13. **`META_CHECKS` 里写 `results.0.x` 取不到**：它拿到的是整个 `data`（信封），分页时 `results` 是数组，逐条字段仍然只能用 `checks`；`META_CHECKS` 只管 `page` / `size` / `total` 这类整体字段。
 
 ### 顺带：Pydantic 422 报文的坑
 
@@ -414,6 +472,8 @@ def onRequest(context, request):
 - **Q：报「公共引擎不存在」？** 检查 `~/Documents/reqable/reqable_check_core.py` 是否在位、`~` 是否正确展开。
 - **Q：字段明明有值却判失败？** 看是不是 `exists` 默认严格（null / 空串也失败）、`for_each` 指到了对象而非数组，或 `eq` 的期望值类型写错（字符串 vs 数字）。`top_fields` 报缺失时看行尾的「实际有」列表——键名对不上就是 `path` 指错了对象（复制别的检查忘改）。
 - **Q：`shared_eq` 一直显示「跳过」？** 先看 `onRequest` 打印的 `shared = {...}` 里有没有那个键；注意 `shared_key` 填的是键名，不是 `shared`。
+- **Q：`shared` 里没有 URL 里的那个 ID？** 引擎只收「末两段、且末段像 ID（纯数字 / UUID）」，键名是**倒数第二段原样**——`/v2/events/record/xxxxxx` 是 `record`，不是 `id`；`/record/{id}/objects` 这种 ID 在中间的要自己补（第五节 3）。
 - **Q：URL 明明带了参数，`shared` 还是 `{}`？** 多半是 Reqable 里挂的引擎还是旧版（旧版 `onRequest` 只收请求体，GET 就是空）；换成当前 `reqable_check_core.py` 后 `?ids=1&ids=2` 会出现 `_query`。
 - **Q：`sub_checks` 整组显示「跳过」？** 说明那个对象是 `null`，按设计视为正常。若它本该存在，另加一条 `{"desc": "camera 必须存在", "kind": "exists", "path": "camera"}` 断言非 null。
-- **Q：想临时跳过某条规则？** 直接从 `checks` 里删掉或注释那一项。
+- **Q：`page` / `size` / `total` 写进 `checks` 一直取不到？** 它们不在单条记录上，属整体级，挪到 `META_CHECKS`（见第四节末）。`checks` 对每条 record 各跑一遍，信封字段本来就不在那儿。
+- **Q：想临时跳过某条规则？** 直接从 `checks` 里删掉或注释那一项；整体级的同理，从 `META_CHECKS` 里去掉。

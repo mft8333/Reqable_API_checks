@@ -17,6 +17,7 @@
 #   shared_in  : 响应值【属于】shared 里的列表(列表接口用：返回的每条 id 是否都在请求的 ids 里)
 #                {"desc","kind","path","shared_key"}  取键规则与 shared_eq 完全相同
 #                shared 取到的若不是列表，会自动当成单元素列表比；严格相等，注意类型
+#                path 取到的是数组时，要求【每个元素都属于】请求(如 detail.task_ids vs _body.task_id)
 #   sub_checks : 对【单个对象】执行 "sub" 里的多条子检查(可套 top_fields/eq/exists/list_field/for_each)；
 #                {"desc","kind","path","sub":[ ...子检查... ]}  对象为 null / 父级为 null 视为正常
 #                适用「可选对象但字段多」：一条检查打包整组，对象是 null 时整组 ℹ️ 跳过
@@ -26,6 +27,11 @@
 #                注意: path 必须指向数组；单个对象请用 sub_checks（或 top_fields + path）
 #                数组套数组时，内层写 "path": "." 表示【当前这个元素本身】(如 detected_objects)
 #                加 "null_ok": True 时，该数组字段【整体不存在】也放行(用于可选数组，如某些项没有 zones)
+#   整体级     : META_CHECKS 列表，只跑一次、对象是整个响应 data（分页的 page / size / total 等信封字段）
+#                kind 语法与 checks 完全相同；不写 / 写 [] / 写 None 都不会报错
+#    通用	   : path / shared_key 遇到数组时，写数字是下标(vlms.0.x)，写字段名则投影成列表
+#                (如 _body.event_type_id → [103, 206]，要求每项都有该字段)
+#                写了不属于该 kind 的键(如 exists 里塞 sub)会打 ⚠️，这些键不生效
 # ==============================================================
 
 from reqable import *
@@ -39,6 +45,17 @@ exec(compile(open(CORE, encoding="utf-8").read(), CORE, "exec"), globals())
 
 # 期望响应码；本清单按任务详情接口（201）写的，换接口改这里
 EXPECTED_CODE = 201
+
+# 整体级检查：只跑一次、对象是整个响应 data（分页的 page / size / total / total_pages）
+# 本接口是单对象响应，没有整体级断言；不写 / 写 [] 都行，引擎不会报错
+META_CHECKS = []
+
+# 分页接口按需启用（示例）：
+# META_CHECKS = [
+#     {"desc": "分页字段齐全", "kind": "top_fields", "fields": ["page", "size", "total_pages", "total"]},
+#     {"desc": "page 从 1 开始", "kind": "eq", "path": "page", "value": 1},
+#     {"desc": "size 为 5", "kind": "eq", "path": "size", "value": 5},
+# ]
 
 
 # ========================= 检查项 =========================
@@ -88,9 +105,10 @@ checks = [
     ]},
 
     # 9) shared_eq：响应值与 shared 比对
-    #    ID 只在路径里时，需按 README 第五节 3) 覆盖 onRequest 补 _path_ids，否则此条 ℹ️ 跳过
+    #    ID 在路径末段时引擎已自动收：/v2/tasks/{id} → shared["tasks"]，直接用这个键名
+    #    ID 在路径中间（/record/{id}/objects）时才需按 README 第五节 3) 自己补 onRequest
     {"desc": "响应 id 与 URL 中的 ID 一致", "kind": "shared_eq",
-     "path": "id", "shared_key": "_path_ids.0"},
+     "path": "id", "shared_key": "tasks"},
 ]
 # ============================================================
 
@@ -100,7 +118,8 @@ checks = [
 #     {"desc": "每条 id 都属于请求的 ids", "kind": "shared_in",
 #      "path": "id", "shared_key": "_query.ids"},
 # ]
-# 注意：results 型响应 checks 是逐条跑的，"total" 这类整体计数当前引擎做不到。
+# 注意：results 型响应 checks 是逐条跑的，"page / size / total" 这类信封字段写进 checks 取不到，
+#      改用整体级 META_CHECKS（写法见文件上方 EXPECTED_CODE 之后）。
 #
 # 请求体回显（顶层字段已平铺，直接用原字段名）：
 # {"desc": "响应 event_type_id 与请求一致", "kind": "shared_eq", "path": "event_type_id"}

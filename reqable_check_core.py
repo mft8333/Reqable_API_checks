@@ -24,12 +24,14 @@
 #                "path": "." 表示当前对象本身；对象字段整体不存在时加 null_ok: True 放行
 #   for_each   : 对【数组】每个元素递归执行 "sub" 里的子检查(可再套 top_fields/list_field/for_each)；
 #                {"desc","kind","path","sub":[ ...子检查... ]}  数组为 null 或父级为 null 视为正常
-#                注意: path 必须指向数组；单个对象请用 top_fields + path
+#                注意: path 必须指向数组；单个对象请用 sub_checks（或 top_fields + path）
 #                数组套数组时，内层写 "path": "." 表示【当前这个元素本身】(如 detected_objects)
 #                加 "null_ok": True 时，该数组字段【整体不存在】也放行(用于可选数组，如某些项没有 zones)
-# 通用: path / shared_key 遇到数组时，写数字是下标(vlms.0.x)，写字段名则投影成列表
-#       (如 _body.event_type_id → [103, 206]，要求每项都有该字段)
-#       写了不属于该 kind 的键(如 exists 里塞 sub)会打 ⚠️，这些键不生效
+#   整体级      : META_CHECKS 列表，只跑一次、对象是整个响应 data（分页的 page / size / total 等信封字段）
+#                kind 语法与 checks 完全相同；不写 / 写 [] / 写 None 都不会报错
+#    通用	   : path / shared_key 遇到数组时，写数字是下标(vlms.0.x)，写字段名则投影成列表
+#                (如 _body.event_type_id → [103, 206]，要求每项都有该字段)
+#                写了不属于该 kind 的键(如 exists 里塞 sub)会打 ⚠️，这些键不生效
 # ==============================================================
 
 from reqable import *
@@ -37,6 +39,10 @@ import json
 
 # 期望的响应码；规则脚本里写 EXPECTED_CODE = 201 即可覆盖
 EXPECTED_CODE = 200
+
+# 整体级检查：只跑一次、对象是整个响应 data（分页的 page / size / total 这类信封字段）
+# 规则脚本里覆盖即可；不写、写 [] 或 None 都不会报错
+META_CHECKS = []
 
 def _get_nested(obj, path):
     """按点分路径取值，支持穿过数组(下标)；返回 (是否存在, 值)。
@@ -391,7 +397,7 @@ def _val(v):
 
 
 def onRequest(context, request):
-    """收集 shared：请求体平铺 + _body，URL 查询参数 _query / _query_all。
+    """收集 shared：请求体平铺 + _body，URL 查询参数 _query / _query_all，路径末两段「键=值」。
 
     onRequest 与 onResponse 不同进程，跨阶段只能靠 context.shared。
     """
@@ -427,6 +433,15 @@ def onRequest(context, request):
         sh["_query"] = q
         sh["_query_all"] = qall
 
+    # 3) URL 路径最后两段当「键 = 值」：/record/xxxxx → shared["record"] = xxxxx
+    #    末段不像 ID 不收；键名和请求体字段重名时以请求体为准
+    segs = [s for s in full.split("?", 1)[0].split("/") if s]
+    if len(segs) >= 2:
+        k, v = segs[-2], segs[-1]
+        if (v.isdigit() or (len(v) >= 8 and all(c in "0123456789abcdefABCDEF-" for c in v))) \
+                and k.replace("_", "").isalpha() and k not in sh:
+            sh[k] = _val(v)
+
     context.shared = sh
     if _AUTO_PRINT_SHARED:
         _print_shared(context)                              # 打印 shared，照它写 shared_key
@@ -450,7 +465,7 @@ def onResponse(context, response):
             print("⚠️ results 不是列表")
             return response
         records = results
-        print(f"✅ 请求成功: total={data.get('total')}, size={data.get('size')}, 返回 {len(records)} 条\n")
+        print(f"✅ 请求成功: page={data.get('page')}, total={data.get('total')}, size={data.get('size')}, 返回 {len(records)} 条\n")
     elif isinstance(data, dict):
         records = [data]                        # 单对象响应：整个 data 当作一条记录
         print("✅ 请求成功: 单对象响应，待检查 1 条\n")
@@ -469,6 +484,16 @@ def onResponse(context, response):
             try:
                 fail += _run_check(r, c, context)
             except Exception as e:                  # 单条配置写错不该中断整轮检查
+                print(f"❌ {c.get('desc', c.get('kind', '?'))}: 检查执行异常 {type(e).__name__}: {e}")
+                fail += 1
+        print()
+    metas = globals().get("META_CHECKS") or []          # 未定义 / None 都当空，不报错
+    if metas:
+        print("—— 检查 [整体] ——")
+        for c in metas:
+            try:
+                fail += _run_check(data, c, context)
+            except Exception as e:                  # 与逐条检查同样兜底
                 print(f"❌ {c.get('desc', c.get('kind', '?'))}: 检查执行异常 {type(e).__name__}: {e}")
                 fail += 1
         print()
