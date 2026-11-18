@@ -6,6 +6,11 @@
 #   eq         : 字段值 == 期望值
 #                {"desc","kind","key","value"}         顶层字段
 #                {"desc","kind","path","value"}        嵌套字段(path 点分，数组用下标如 vlms.0.x)
+#   gt/gte/lt/lte : 大小比较（> >= < <=），要求两边【同为数字】或【同为 ISO 时间串】
+#                {"desc","kind","path","value"}         与常量比
+#                {"desc","kind","path","shared_key"}    与 onRequest 写入的请求值比（二选一，都写时按 shared_key）
+#                时间写法: 2026-05-15 / 2026-05-15T08:00:00Z / 2026-05-15T08:00:36.782976Z
+#                无时区的按 UTC 处理；普通文本不当时间比，"5" 与 5 也不算同类（不做隐式转换）
 #   exists     : 字段是否存在；默认 null 和 ""(空串) 都算错，加 "null_ok": True 放行 null/""(含父级为 null)
 #                ★支持批量: {"desc","kind","fields":[...],"null_ok":True,"optional":True}
 #                fields 一次查多个顶层字段；null_ok 放行 null；optional 允许字段整体缺失(只提示不失败)
@@ -18,6 +23,11 @@
 #                {"desc","kind","path","shared_key"}  取键规则与 shared_eq 完全相同
 #                shared 取到的若不是列表，会自动当成单元素列表比；严格相等，注意类型
 #                path 取到的是数组时，要求【每个元素都属于】请求(如 detail.task_ids vs _body.task_id)
+#   shared_not_in : 响应值【不属于】shared 里的列表 —— shared_in 的反面，用于排除名单(黑名单)
+#                {"desc","kind","path","shared_key"}  取键规则与 shared_in 完全相同
+#                path 取到的是数组时，要求【每个元素都不命中】排除名单
+#                shared 取到空列表 [] 时没有可排除的值，打 ℹ️ 视为通过（不会误判通过一堆数据）
+#                shared 取到的若不是列表，同样当成单元素列表比；严格相等，注意类型
 #   sub_checks : 对【单个对象】执行 "sub" 里的多条子检查(可套 top_fields/eq/exists/list_field/for_each)；
 #                {"desc","kind","path","sub":[ ...子检查... ]}  对象为 null / 父级为 null 视为正常
 #                适用「可选对象但字段多」：一条检查打包整组，对象是 null 时整组 ℹ️ 跳过
@@ -35,7 +45,9 @@
 # ==============================================================
 
 from reqable import *
+import datetime as _dt
 import json
+from urllib.parse import unquote
 
 # 期望的响应码；规则脚本里写 EXPECTED_CODE = 201 即可覆盖
 EXPECTED_CODE = 200
@@ -89,6 +101,39 @@ def _is_empty(v):
     return v is None or v == ""
 
 
+def _is_num(v):
+    """能参与大小比较的“数字”：int / float，bool 不算（True 会被当成 1 混过去）。"""
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _to_time(v):
+    """把 ISO 8601 时间串解析成 UTC datetime；认不出返回 None（调用方据此判 ❌）。
+    认: 2026-05-15 / 2026-05-15T08:00:00 / 空格分隔 / 带 .微秒 / 带 Z 或 ±HH:MM(±HHMM)
+    不认: 普通文本 —— 绝不做字典序比较，否则 "abc" > "abd" 会让配错的检查悄悄通过
+    """
+    if not isinstance(v, str):
+        return None
+    s = v.strip()
+    if len(s) < 10 or (len(s) > 10 and "T" not in s and " " not in s):
+        return None
+    if s[-5] in "+-" and s[-4:].isdigit():      # +0800 → +08:00（3.11 以下 fromisoformat 不认无冒号写法）
+        s = s[:-2] + ":" + s[-2:]
+    if s[-1] in "Zz":                           # 3.10 及以下 fromisoformat 不认 Z
+        s = s[:-1] + "+00:00"
+    try:
+        dt = _dt.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:                       # naive 统一按 UTC，避免 aware/naive 混比抛 TypeError
+        dt = dt.replace(tzinfo=_dt.timezone.utc)
+    return dt.astimezone(_dt.timezone.utc)
+
+
+# 大小比较：kind 就是运算符，写法和 eq 一样（path/key + value）
+_CMP_OPS = {"gt": (">", lambda a, b: a > b), "gte": (">=", lambda a, b: a >= b),
+            "lt": ("<", lambda a, b: a < b), "lte": ("<=", lambda a, b: a <= b)}
+
+
 def _brief(v, n=3):
     """列表超过 n 项时只显示前 n 项，避免一条检查刷屏。"""
     if isinstance(v, list) and len(v) > n:
@@ -120,12 +165,17 @@ _COMMON_KEYS = {"desc", "kind", "path", "key"}
 _KIND_KEYS = {
     "top_fields": {"fields"},
     "eq": {"value"},
+    "gt": {"value", "null_ok", "shared_key", "require_shared"},
+    "gte": {"value", "null_ok", "shared_key", "require_shared"},
+    "lt": {"value", "null_ok", "shared_key", "require_shared"},
+    "lte": {"value", "null_ok", "shared_key", "require_shared"},
     "exists": {"fields", "null_ok", "optional"},
     "list_field": {"field"},
     "for_each": {"sub", "null_ok"},
     "sub_checks": {"sub", "null_ok"},
     "shared_eq": {"shared_key", "require_shared"},
     "shared_in": {"shared_key", "require_shared"},
+    "shared_not_in": {"shared_key", "require_shared"},
 }
 
 
@@ -174,6 +224,51 @@ def _run_check(r, c, ctx=None):
         exists, actual = _get_value(r, c)
         ok = exists and actual == c["value"]
         print(f"{'✅' if ok else '❌'} {c['desc']}: 实际 {actual!r} / 期望 {c['value']!r}")
+        return 0 if ok else 1
+
+    # 大小比较：kind 即运算符（gt / gte / lt / lte）
+    # 两边同为数字 → 比数字；两边同为 ISO 时间串 → 比时间；其余一律 ❌（不做隐式转换）
+    # 比较基准：value（常量）或 shared_key（onRequest 写入的请求值），二选一
+    elif kind in _CMP_OPS:
+        sym, fn = _CMP_OPS[kind]
+        skey = c.get("shared_key")
+        if skey:
+            if "value" in c:
+                print(f"⚠️ {c['desc']}: {kind} 同时写了 value 和 shared_key，按 shared_key 比较")
+            sh_exists, want = _shared_value(ctx, skey)
+            if not sh_exists:
+                if c.get("require_shared"):
+                    print(f"❌ {c['desc']}: context.shared 中没有 {skey}（onRequest 未写入/未生效，或 shared 为空）")
+                    return 1
+                print(f"ℹ️ {c['desc']}: context.shared 不可用或没有 {skey}，跳过")
+                return 0
+            label = "shared"
+        else:
+            if "value" not in c:
+                print(f"⚠️ {c['desc']}: {kind} 缺少 value（或改用 shared_key），跳过")
+                return 0
+            want, label = c["value"], "期望"
+        exists, actual = _get_value(r, c)
+        if not exists:
+            if c.get("null_ok"):
+                print(f"ℹ️ {c['desc']}: 字段不存在（null_ok 放行）")
+                return 0
+            print(f"❌ {c['desc']}: 字段 {c.get('path') or c.get('key')} 不存在")
+            return 1
+        if actual is None and c.get("null_ok"):
+            print(f"ℹ️ {c['desc']}: 值为 null（null_ok 放行）")
+            return 0
+        if _is_num(actual) and _is_num(want):
+            a_v, w_v, tag = actual, want, ""
+        else:
+            a_v, w_v = _to_time(actual), _to_time(want)   # "5" 和 5 不是一回事，不做隐式转换
+            if a_v is None or w_v is None:
+                print(f"❌ {c['desc']}: 只能比较数字或 ISO 时间，实际 {actual!r}（{type(actual).__name__}）"
+                      f" / {label} {want!r}（{type(want).__name__}）")
+                return 1
+            tag = "（按时间）"
+        ok = fn(a_v, w_v)
+        print(f"{'✅' if ok else '❌'} {c['desc']}: 实际 {actual!r} {sym} {label} {want!r}{tag} → {'成立' if ok else '不成立'}")
         return 0 if ok else 1
 
     # ★新增：批量 exists（一次校验多个顶层字段；optional=True 时缺失放行，null_ok 时 null/"" 放行）
@@ -265,6 +360,41 @@ def _run_check(r, c, ctx=None):
         print(f"{'✅' if ok else '❌'} {c['desc']}: 实际 {actual!r}{tail}")
         return 0 if ok else 1
 
+    elif kind == "shared_not_in":
+        # 响应值【不属于】onRequest 写入的排除名单（shared_in 的反面：黑名单里的 id 一个都不能出现）
+        skey = c.get("shared_key") or c.get("path") or c.get("key")
+        sh_exists, want = _shared_value(ctx, skey)
+        if not skey:
+            print(f"⚠️ {c['desc']}: 缺少 shared_key（shared_not_in 需指定 shared 中的列表字段名）")
+            return 0
+        if not sh_exists:
+            if c.get("require_shared"):
+                print(f"❌ {c['desc']}: context.shared 中没有 {skey}（onRequest 未写入/未生效，或 shared 为空）")
+                return 1
+            print(f"ℹ️ {c['desc']}: context.shared 不可用或没有 {skey}，跳过")
+            return 0
+        deny = want if isinstance(want, list) else [want]
+        if not deny:                                # 空名单：没有可排除的值，说清楚而不是假装检查过
+            print(f"ℹ️ {c['desc']}: shared {skey} 是空列表，没有可排除的值（视为通过）")
+            return 0
+        exists, actual = _get_value(r, c)
+        if not exists:
+            where = c.get("path") or c.get("key") or "?"
+            print(f"❌ {c['desc']}: 取不到 {where}（字段不存在或路径写错）")
+            return 1
+        if isinstance(actual, list):                # 响应侧也是数组：要求每个元素都不命中排除名单
+            bad = [x for x in actual if x in deny]
+            ok = not bad
+            if ok:
+                print(f"✅ {c['desc']}: 实际 {_brief(actual)}，{len(actual)} 项都不在排除名单")
+            else:
+                print(f"❌ {c['desc']}: 实际 {_brief(actual)}，其中 {_brief(bad)} 命中排除名单 {_brief(deny)}")
+            return 0 if ok else 1
+        ok = actual not in deny
+        tail = "" if ok else f"，命中排除名单 {deny!r}"
+        print(f"{'✅' if ok else '❌'} {c['desc']}: 实际 {actual!r}{tail}")
+        return 0 if ok else 1
+
     elif kind == "list_field":
         if "field" not in c:
             print(f"⚠️ {c['desc']}: list_field 需要 field（单个字段名，不是 fields），跳过")
@@ -326,8 +456,9 @@ def _run_check(r, c, ctx=None):
                 print(f"⚠️ {c['desc']}: for_each 缺少 sub，跳过")
                 return 0
             fail = 0
+            nested = any(s.get("kind") == "for_each" for s in subs)   # 元素本身是数组时交给内层 for_each
             for j, item in enumerate(arr):
-                if not isinstance(item, dict):          # 元素是数字/字符串时不再往下传，报一条就够
+                if not isinstance(item, dict) and not (nested and isinstance(item, list)):
                     print(f"❌ {c['desc']}[{j}]: 数组元素是 {type(item).__name__}，不是对象"
                           f"（ID 数组不能逐项查字段，去掉这条 for_each 或改用 exists）")
                     fail += 1
@@ -419,13 +550,15 @@ def onRequest(context, request):
     full = str(context.url)                                 # 完整 URL，含 query
 
     # 2) 查询参数：不认参数名，全收
-    #    _query 单值→标量 / 重复 key→列表（转类型）；_query_all 一律列表、原始字符串
+    #    _query 单值→标量 / 重复 key→列表（转类型）；_query_all 一律列表、字符串
+    #    两者都做 URL 解码（%20 → 空格），否则响应里的 "False Alarm" 永远对不上 "False%20Alarm"
     if "?" in full:
         q, qall = {}, {}
         for pair in full.split("?", 1)[1].split("&"):
             if not pair:
                 continue
             k, v = pair.split("=", 1) if "=" in pair else (pair, "")
+            k, v = unquote(k), unquote(v)
             qall.setdefault(k, []).append(v)
         for k, vs in qall.items():
             vals = [_val(x) for x in vs]

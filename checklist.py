@@ -6,6 +6,14 @@
 #   eq         : 字段值 == 期望值
 #                {"desc","kind","key","value"}         顶层字段
 #                {"desc","kind","path","value"}        嵌套字段(path 点分，数组用下标如 vlms.0.x)
+#   gt/gte/lt/lte : 大小比较（> / >= / < / <=），写法和 eq 一样
+#                两边同为数字 → 比数字：{"desc","kind":"gte","path","value":0.4}  实际 0.48 >= 0.4 → 成立
+#                两边同为 ISO 时间串 → 比时间（输出末尾带「（按时间）」）：
+#                {"desc":"事件时间不早于请求","kind":"gte","path":"event_time","shared_key":"_body.event_time"}
+#                认 2026-05-15 / 2026-05-15T08:00:36.782976Z / 空格分隔 / +08:00、+0800；无时区按 UTC
+#                比较基准写 value（常量）或 shared_key（请求值，此时不写 value）
+#                剩下的一律判 ❌：不做隐式转换（"5" 和 5 不同类）、bool 不是数字、普通文本不按字典序比
+#                区间用两条：gte + lte；字段缺失/值为 null 时加 "null_ok": True 放行
 #   exists     : 字段是否存在；默认 null 和 ""(空串) 都算错，加 "null_ok": True 放行 null/""(含父级为 null)
 #                ★支持批量: {"desc","kind","fields":[...],"null_ok":True,"optional":True}
 #                fields 一次查多个顶层字段；null_ok 放行 null；optional 允许字段整体缺失(只提示不失败)
@@ -18,6 +26,12 @@
 #                {"desc","kind","path","shared_key"}  取键规则与 shared_eq 完全相同
 #                shared 取到的若不是列表，会自动当成单元素列表比；严格相等，注意类型
 #                path 取到的是数组时，要求【每个元素都属于】请求(如 detail.task_ids vs _body.task_id)
+#   shared_not_in : 响应值【不属于】shared 里的列表 —— shared_in 的反面（排除名单 / 黑名单）
+#                {"desc","kind","path","shared_key"}  取键规则与 shared_in 完全相同
+#                {"desc":"id 不在排除名单","kind":"shared_not_in","path":"id",
+#                 "shared_key":"_query.exclude_ids","require_shared":True}
+#                path 取到的是数组时，要求【每个元素都不命中】，失败会列出命中项
+#                shared 是空列表 [] 时打 ℹ️「没有可排除的值」视为通过，不会静默全通过
 #   sub_checks : 对【单个对象】执行 "sub" 里的多条子检查(可套 top_fields/eq/exists/list_field/for_each)；
 #                {"desc","kind","path","sub":[ ...子检查... ]}  对象为 null / 父级为 null 视为正常
 #                适用「可选对象但字段多」：一条检查打包整组，对象是 null 时整组 ℹ️ 跳过
@@ -109,6 +123,18 @@ checks = [
     #    ID 在路径中间（/record/{id}/objects）时才需按 README 第五节 3) 自己补 onRequest
     {"desc": "响应 id 与 URL 中的 ID 一致", "kind": "shared_eq",
      "path": "id", "shared_key": "tasks"},
+
+    # 10) gt / gte / lt / lte：大小比较（拿不准字段值就别写死上限，先用 gte 探实际值）
+    {"desc": "id 是正数", "kind": "gt", "path": "id", "value": 0},
+
+    # 时间比较大：两边都是 ISO 时间串就自动按时间比，不用转格式
+    # {"desc": "事件时间不早于请求时间", "kind": "gte",
+    #  "path": "event_time", "shared_key": "_body.event_time"},
+
+    # 11) shared_not_in：排除名单（响应值不能落在 shared 的名单里）
+    #     请求侧要有对应参数（如 ?exclude_ids=9&exclude_ids=10）才生效，没有则 ℹ️ 跳过
+    # {"desc": "id 不在排除名单", "kind": "shared_not_in",
+    #  "path": "id", "shared_key": "_query.exclude_ids", "require_shared": True},
 ]
 # ============================================================
 
@@ -127,4 +153,8 @@ checks = [
 # 嵌套请求体字段（走 _body）：
 # {"desc": "object_key 与请求一致", "kind": "shared_eq",
 #  "path": "object_key", "shared_key": "_body.data.object_key"}
+#
+# 排除名单（返回的 id 不能出现在请求的 exclude_ids 里）：
+# {"desc": "id 不在排除名单", "kind": "shared_not_in",
+#  "path": "id", "shared_key": "_query.exclude_ids", "require_shared": True}
 # ============================================================

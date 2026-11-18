@@ -65,12 +65,12 @@ checks = [
 | `desc` | 规则描述，报错时用来定位是哪条检查 |
 | `kind` | 检查类型，见下表 |
 | `path` | 点分路径，指向嵌套对象或数组；数组元素用下标，如 `vlms.0.x`；写 `"."` 表示当前对象本身（数组套数组时用） |
-| `key` | 仅 `eq` / `exists` 的顶层字段写法 |
+| `key` | 仅 `eq` / `exists` / `gt`·`gte`·`lt`·`lte` 的顶层字段写法 |
 | `fields` | 批量字段名列表，用于 `top_fields` / 批量 `exists` |
-| `value` | `eq` 的期望值 |
+| `value` | `eq` 的期望值；`gt` / `gte` / `lt` / `lte` 的比较基准（常量） |
 | `sub` | `sub_checks` / `for_each` 的子检查列表，可继续嵌套 |
-| `shared_key` | 仅 `shared_eq` / `shared_in`：`context.shared` 里的取值路径（点分，如 `_query.ids`）；数组写字段名会投影成列表；省略时退化为 `path` / `key` |
-| `require_shared` | 仅 `shared_eq` / `shared_in`：`True` 时 `shared` 里没有该字段判 ❌，否则只 ℹ️ 跳过 |
+| `shared_key` | `shared_eq` / `shared_in` / `shared_not_in` / `gt`·`gte`·`lt`·`lte`：`context.shared` 里的取值路径（点分，如 `_query.ids`）；数组写字段名会投影成列表；省略时退化为 `path` / `key` |
+| `require_shared` | `shared_eq` / `shared_in` / `shared_not_in` / `gt`·`gte`·`lt`·`lte`：`True` 时 `shared` 里没有该字段判 ❌，否则只 ℹ️ 跳过 |
 | `null_ok` | `True` 时放行 `null` / 空串 `""`（含父级为 `null`）；在 `for_each` 上还表示「数组字段整体不存在」也放行 |
 | `optional` | `True` 时字段整体缺失只提示、不算失败（随类型变化的可选字段） |
 
@@ -82,10 +82,12 @@ checks = [
 | --- | --- | --- |
 | `top_fields` | 必须存在的字段列表；加 `path` 可查嵌套子对象 | 单个对象 |
 | `eq` | 字段值 == 期望值 | 任意可寻址字段 |
+| `gt` / `gte` / `lt` / `lte` | 大小比较（`>` / `>=` / `<` / `<=`），两边同为数字或同为 ISO 时间串 | 任意可寻址字段（值为数字 / 时间串） |
 | `exists` | 字段是否存在（默认严格，`null` 或 `""` 也判失败） | 单个或批量顶层字段 |
 | `list_field` | 数组里每个元素都必须含某字段 | `path` 指向数组 |
 | `shared_eq` | 响应字段 == `onRequest` 写入 `context.shared` 的值 | 任意可寻址字段 |
 | `shared_in` | 响应字段属于 `context.shared` 里的列表（列表接口逐条校验）；响应字段本身是数组时，要求每个元素都属于 | 任意可寻址字段 / 数组 |
+| `shared_not_in` | 响应字段**不属于** `context.shared` 里的列表（排除名单）；响应字段本身是数组时，要求每个元素都不命中 | 任意可寻址字段 / 数组 |
 | `sub_checks` | 对单个对象执行 `sub` 里的一组子检查（可选对象打包用） | `path` 指向单个对象 |
 | `for_each` | 对数组每个元素递归执行 `sub` 里的子检查 | `path` 必须指向数组 |
 
@@ -140,6 +142,42 @@ checks = [
 {"desc": "某顶层字段应为 X", "kind": "eq", "key": "task_status", "value": "active"},  # 顶层写法
 ```
 
+**3.5 大小比较 → `gt` / `gte` / `lt` / `lte`**（`>` / `>=` / `<` / `<=`，写法和 `eq` 一样）
+
+```python
+{"desc": "confidence_score >= 0.4", "kind": "gte", "path": "confidence_score", "value": 0.4},
+{"desc": "confidence_score <= 1",   "kind": "lte", "path": "confidence_score", "value": 1},
+{"desc": "task_id 是正数",           "kind": "gt",  "path": "task_id", "value": 0},
+```
+
+```
+✅ confidence_score >= 0.4: 实际 0.48 >= 0.4 → 成立
+❌ confidence_score <= 1: 实际 1.2 <= 1 → 不成立
+```
+
+**时间也能比**：两边同为 ISO 8601 时间串时自动按时间比较（输出末尾带 `（按时间）`）：
+
+```python
+{"desc": "事件时间不早于请求时间", "kind": "gte", "path": "event_time", "shared_key": "_body.event_time"},
+{"desc": "created_at 晚于 2026-05-15", "kind": "gt", "path": "created_at", "value": "2026-05-15"},
+```
+
+```
+✅ 事件时间不早于请求时间: 实际 '2026-05-15T08:00:36.782976Z' >= shared '2026-05-15T08:00:00Z'（按时间） → 成立
+```
+
+认得的写法：`2026-05-15`、`2026-05-15T08:00:00`、`2026-05-15 08:00:00`（空格分隔）、带 `.782976` 微秒、
+带 `Z` 或 `+08:00` / `+0800` 时区。**没写时区的一律按 UTC**，所以 `2026-05-15T16:00:00+08:00` 与
+`2026-05-15T08:00:00Z` 是同一时刻；微秒和秒级也能直接比。
+
+- **两边都必须是数字或都是时间串**：`"5"`、`null`、`true` / `false` 都判 ❌ 并打印实际类型，不做隐式转换；
+  一边数字一边时间串同样判 ❌；**普通文本绝不按字典序比较**（否则 `"abc" > "abd"` 会让配错的检查悄悄通过）；
+- **比较基准可换成请求值**：写 `shared_key` 代替 `value`，就是拿响应值和 `context.shared` 里的值比
+  （`{"kind": "gte", "path": "id", "shared_key": "_query.id"}` → `✅ 实际 116 >= shared 103`）；
+  两个都写时按 `shared_key` 比较并打 ⚠️；`shared` 里没有该键默认 ℹ️ 跳过，加 `require_shared: True` 改判 ❌；
+- 区间用两条（`gte` + `lte`），引擎没有 `between`；
+- 字段缺失判 ❌，值为 `null` 也判 ❌，两种情况都可以加 `"null_ok": True` 放行。
+
 **4. 严格存在性 → `exists`**（默认 `null` 与空串 `""` 都判失败；`null_ok: True` 才放行）
 
 ```python
@@ -188,7 +226,7 @@ checks = [
 
 数组里每个元素都必须含某字段；数组为 `null` 或父级为 `null` 视为正常。具体键名以 `reqable_check_core.py` 的实现为准。
 
-**7. 与请求参数比对 → `shared_eq` / `shared_in`**（详见第五节）
+**7. 与请求参数比对 → `shared_eq` / `shared_in` / `shared_not_in`**（详见第五节）
 
 ```python
 # 响应回显请求体里的字段（请求体顶层字段已平铺到 shared 根上）
@@ -198,6 +236,10 @@ checks = [
 # 列表接口：返回的每条记录 id 都属于请求 ?ids=1&ids=2
 {"desc": "每条 id 都属于请求的 ids", "kind": "shared_in",
  "path": "id", "shared_key": "_query.ids", "require_shared": True},
+
+# 排除名单：返回的 id 不能出现在 ?exclude_ids=9&exclude_ids=10 里
+{"desc": "id 不在排除名单", "kind": "shared_not_in",
+ "path": "id", "shared_key": "_query.exclude_ids", "require_shared": True},
 ```
 
 ### null / 缺失规则（最容易混）
@@ -265,8 +307,8 @@ Reqable 的 `onRequest` 与 `onResponse` **在两个进程里执行**，模块�
 | --- | --- | --- |
 | 请求体顶层字段 | JSON body 的每个字段平铺到 `shared` 根上 | body `{"event_type_id": 116}` → `shared["event_type_id"]` |
 | `_body` | 原始请求体结构（body 是数组、或要取嵌套字段时用） | `_body.data.object_key` |
-| `_query` | 查询参数：单值→标量、重复 key→列表、纯数字转 `int` | `?ids=1&ids=2` → `{"ids": [1, 2]}` |
-| `_query_all` | 查询参数：一律列表、一律原始字符串 | `{"ids": ["1", "2"]}` |
+| `_query` | 查询参数：单值→标量、重复 key→列表、纯数字转 `int`，**URL 解码** | `?ids=1&ids=2` → `{"ids": [1, 2]}` |
+| `_query_all` | 查询参数：一律列表、字符串（不转 `int`），同样 URL 解码 | `{"ids": ["1", "2"]}` |
 | 路径末两段 | 末段是 ID 时，倒数第二段当键、末段当值（详见 3)） | `/v2/events/record/xxxxxx` → `{"record": xxxxxx}` |
 
 取值规则：
@@ -274,6 +316,9 @@ Reqable 的 `onRequest` 与 `onResponse` **在两个进程里执行**，模块�
 - 重复 key 合并成列表：`?location_ids=3&location_ids=2` → `[3, 2]`
 - 逗号分隔且每段都是数字也转列表：`?ids=1,2` → `[1, 2]`
 - 前导 0 的数字串保持字符串：`?code=007` → `"007"`
+- **做 URL 解码**：`?event_record_status=False%20Alarm` → `"False Alarm"`，中文同理（`%E4%B8%AD...` → `中文`）；
+  不做这一步，响应里的 `"False Alarm"` 永远对不上请求里的 `"False%20Alarm"`，每条都判 ❌
+- **`+` 不当作空格**：`?q=a+b` → `"a+b"`。要空格请用 `%20`，要字面加号也直接用 `+`
 - GET 没有 body、URL 也没有 query 时，`shared` 是 `{}`
 
 `onRequest` 会把它打印出来，照着写 `shared_key` 最省事：
@@ -283,7 +328,14 @@ request url https://.../observ/apiserver/v2/tasks?location_ids=3&location_ids=2
 shared = {"_query": {"location_ids": [3, 2]}, "_query_all": {"location_ids": ["3", "2"]}}
 ```
 
-### 2) 清单侧：`shared_eq` / `shared_in`
+带空格的值（URL 里是 `%20`，`shared` 里已经是空格）：
+
+```
+request url https://.../v2/events/record?event_record_status=False%20Alarm
+shared = {"_query": {"event_record_status": "False Alarm"}, "_query_all": {"event_record_status": ["False Alarm"]}}
+```
+
+### 2) 清单侧：`shared_eq` / `shared_in` / `shared_not_in`
 
 | 键 | 指向 |
 | --- | --- |
@@ -293,6 +345,7 @@ shared = {"_query": {"location_ids": [3, 2]}, "_query_all": {"location_ids": ["3
 
 - `shared_eq`：响应值 **==** shared 值（请求体回显、单值参数）
 - `shared_in`：响应值 **属于** shared 里的列表（列表接口逐条校验）；响应值是数组时，要求**每个元素都属于**，有一个不在就判 ❌（如 `detail.task_ids` vs 请求的 `ids`）
+- `shared_not_in`：响应值 **不属于** shared 里的列表（**排除名单**，`shared_in` 的反面）；响应值是数组时，要求**每个元素都不命中**，命中一个就判 ❌ 并列出命中项；shared 是空列表 `[]` 时没有可排除的值，打 ℹ️ 视为通过并说明原因
 
 ```python
 # 请求体回显（顶层字段已平铺，可省略 shared_key）
@@ -315,6 +368,14 @@ shared = {"_query": {"location_ids": [3, 2]}, "_query_all": {"location_ids": ["3
 # 响应字段本身是数组：detail.task_ids = [144310, 144311] 对 ?ids=144310，逐个判归属
 {"desc": "每条 task_id 都属于请求", "kind": "shared_in",
  "path": "detail.task_ids", "shared_key": "_query.ids", "require_shared": True},
+
+# 排除名单：请求 ?exclude_ids=9&exclude_ids=10，返回的 id 一个都不能落在名单里
+{"desc": "id 不在排除名单", "kind": "shared_not_in",
+ "path": "id", "shared_key": "_query.exclude_ids", "require_shared": True},
+
+# 响应数组对排除名单：每个元素都不能命中（如返回的 task_ids 不含已删除的）
+{"desc": "task_ids 不含已排除的 id", "kind": "shared_not_in",
+ "path": "detail.task_ids", "shared_key": "_body.exclude_ids", "require_shared": True},
 ```
 
 输出示例：
@@ -326,9 +387,14 @@ shared = {"_query": {"location_ids": [3, 2]}, "_query_all": {"location_ids": ["3
 ❌ 每条 task_id 都属于请求: 实际 [144310, 144311]，其中 [144311] 不在请求消息 [144310] 中
 ❌ 每条 task_id 都属于请求: 取不到 detail.task_idsss（字段不存在或路径写错）
 ℹ️ 响应 id 与 URL 中的 ID 一致: context.shared 不可用或没有 record，跳过
+✅ id 不在排除名单: 实际 5
+❌ id 不在排除名单: 实际 9，命中排除名单 [9, 10]
+✅ task_ids 不含已排除的 id: 实际 [144310, 144311]，2 项都不在排除名单
+❌ task_ids 不含已排除的 id: 实际 [1, 9, 10]，其中 [9, 10] 命中排除名单 [9, 10]
+ℹ️ id 不在排除名单: shared exclude_ids 是空列表，没有可排除的值（视为通过）
 ```
 
-> **类型要一致**：两者都是严格相等。`_query` 已把纯数字转成 `int`，响应是数字就能直接比；响应侧是字符串时改用 `_query_all`（保留原始字符串）。
+> **类型要一致**：两者都是严格相等。`_query` 已把纯数字转成 `int`，响应是数字就能直接比；响应侧是字符串时改用 `_query_all`（保留字符串类型，不转 `int`，但同样做了 URL 解码）。
 >
 > **常见误配**：把 `shared_key` 写成 `"shared"`。它填的是 `shared` 这个 dict 里的键名（如 `event_type_id`、`_query.ids`），不是 `shared` 本身。
 >
