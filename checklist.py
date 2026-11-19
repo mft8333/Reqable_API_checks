@@ -32,6 +32,12 @@
 #                 "shared_key":"_query.exclude_ids","require_shared":True}
 #                path 取到的是数组时，要求【每个元素都不命中】，失败会列出命中项
 #                shared 是空列表 [] 时打 ℹ️「没有可排除的值」视为通过，不会静默全通过
+#   shared_contains : 响应数组【包含】shared 里的每个值（响应 ⊇ 请求，允许服务端追加默认项）
+#                {"desc","kind","path","shared_key"}  取键规则与 shared_in 完全相同
+#                创建类接口必须用这条：服务端会补默认 event_types，此时 shared_in 必然失败
+#                {"desc":"event_type_ids 响应包含请求","kind":"shared_contains",
+#                 "path":"event_types.id","shared_key":"event_type_ids","require_shared":True}
+#                path 必须指向数组或投影成数组；单个值请用 shared_eq
 #   sub_checks : 对【单个对象】执行 "sub" 里的多条子检查(可套 top_fields/eq/exists/list_field/for_each)；
 #                {"desc","kind","path","sub":[ ...子检查... ]}  对象为 null / 父级为 null 视为正常
 #                适用「可选对象但字段多」：一条检查打包整组，对象是 null 时整组 ℹ️ 跳过
@@ -135,6 +141,10 @@ checks = [
     #     请求侧要有对应参数（如 ?exclude_ids=9&exclude_ids=10）才生效，没有则 ℹ️ 跳过
     # {"desc": "id 不在排除名单", "kind": "shared_not_in",
     #  "path": "id", "shared_key": "_query.exclude_ids", "require_shared": True},
+
+    # 12) shared_contains：响应数组要包含请求的每个值（创建接口服务端会补默认项）
+    # {"desc": "event_type_ids 响应包含请求", "kind": "shared_contains",
+    #  "path": "event_types.id", "shared_key": "event_type_ids", "require_shared": True},
 ]
 # ============================================================
 
@@ -157,4 +167,8 @@ checks = [
 # 排除名单（返回的 id 不能出现在请求的 exclude_ids 里）：
 # {"desc": "id 不在排除名单", "kind": "shared_not_in",
 #  "path": "id", "shared_key": "_query.exclude_ids", "require_shared": True}
+#
+# 创建接口（响应是请求的超集，服务端会补默认项）：
+# {"desc": "event_type_ids 响应包含请求", "kind": "shared_contains",
+#  "path": "event_types.id", "shared_key": "event_type_ids", "require_shared": True}
 # ============================================================

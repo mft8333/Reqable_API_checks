@@ -28,6 +28,12 @@
 #                path 取到的是数组时，要求【每个元素都不命中】排除名单
 #                shared 取到空列表 [] 时没有可排除的值，打 ℹ️ 视为通过（不会误判通过一堆数据）
 #                shared 取到的若不是列表，同样当成单元素列表比；严格相等，注意类型
+#   shared_contains : 响应数组【包含】shared 里的每个值（响应 ⊇ 请求，允许服务端追加默认项）
+#                {"desc","kind","path","shared_key"}  取键规则与 shared_in 完全相同
+#                典型场景：创建任务时服务端会补默认 event_types，响应比请求多出几个，
+#                这时 shared_in(每项都属于请求) 必然失败，改用本条只校验「请求的都出现」
+#                path 必须指向数组(或投影成数组，如 event_types.id)，否则判 ❌ 并提示改用 shared_eq
+#                shared 只有单值时同样要求它出现在响应数组里；空列表 [] 打 ℹ️ 视为通过
 #   sub_checks : 对【单个对象】执行 "sub" 里的多条子检查(可套 top_fields/eq/exists/list_field/for_each)；
 #                {"desc","kind","path","sub":[ ...子检查... ]}  对象为 null / 父级为 null 视为正常
 #                适用「可选对象但字段多」：一条检查打包整组，对象是 null 时整组 ℹ️ 跳过
@@ -134,8 +140,10 @@ _CMP_OPS = {"gt": (">", lambda a, b: a > b), "gte": (">=", lambda a, b: a >= b),
             "lt": ("<", lambda a, b: a < b), "lte": ("<=", lambda a, b: a <= b)}
 
 
-def _brief(v, n=3):
-    """列表超过 n 项时只显示前 n 项，避免一条检查刷屏。"""
+def _brief(v, n=5):
+    """列表超过 n 项时只显示前 n 项，避免一条检查刷屏。
+    n 默认 5：常见的 3~5 项 id 列表能完整显示，不出现「...共N个」占位。
+    """
     if isinstance(v, list) and len(v) > n:
         return v[:n] + [f"...共{len(v)}个"]
     return v
@@ -176,6 +184,7 @@ _KIND_KEYS = {
     "shared_eq": {"shared_key", "require_shared"},
     "shared_in": {"shared_key", "require_shared"},
     "shared_not_in": {"shared_key", "require_shared"},
+    "shared_contains": {"shared_key", "require_shared"},
 }
 
 
@@ -393,6 +402,40 @@ def _run_check(r, c, ctx=None):
         ok = actual not in deny
         tail = "" if ok else f"，命中排除名单 {deny!r}"
         print(f"{'✅' if ok else '❌'} {c['desc']}: 实际 {actual!r}{tail}")
+        return 0 if ok else 1
+
+    elif kind == "shared_contains":
+        # 响应数组【包含】shared 里的每个值（响应 ⊇ 请求）：服务端会追加默认项时用这条
+        skey = c.get("shared_key") or c.get("path") or c.get("key")
+        sh_exists, want = _shared_value(ctx, skey)
+        if not skey:
+            print(f"⚠️ {c['desc']}: 缺少 shared_key（shared_contains 需指定 shared 中的列表字段名）")
+            return 0
+        if not sh_exists:
+            if c.get("require_shared"):
+                print(f"❌ {c['desc']}: context.shared 中没有 {skey}（onRequest 未写入/未生效，或 shared 为空）")
+                return 1
+            print(f"ℹ️ {c['desc']}: context.shared 不可用或没有 {skey}，跳过")
+            return 0
+        need = want if isinstance(want, list) else [want]
+        if not need:                                # 请求侧没给要求，说清楚而不是假装检查过
+            print(f"ℹ️ {c['desc']}: shared {skey} 是空列表，没有要求包含的值（视为通过）")
+            return 0
+        exists, actual = _get_value(r, c)
+        if not exists:
+            where = c.get("path") or c.get("key") or "?"
+            print(f"❌ {c['desc']}: 取不到 {where}（字段不存在或路径写错）")
+            return 1
+        if not isinstance(actual, list):
+            print(f"❌ {c['desc']}: path 需指向数组，实际 {actual!r}（{type(actual).__name__}）；"
+                  f"单个值请改用 shared_eq")
+            return 1
+        missing = [x for x in need if x not in actual]
+        ok = not missing
+        if ok:
+            print(f"✅ {c['desc']}: 实际 {_brief(actual)}，请求的 {len(need)} 项都在响应中")
+        else:
+            print(f"❌ {c['desc']}: 实际 {_brief(actual)}，缺少请求中的 {_brief(missing, 10)}")
         return 0 if ok else 1
 
     elif kind == "list_field":

@@ -69,8 +69,8 @@ checks = [
 | `fields` | 批量字段名列表，用于 `top_fields` / 批量 `exists` |
 | `value` | `eq` 的期望值；`gt` / `gte` / `lt` / `lte` 的比较基准（常量） |
 | `sub` | `sub_checks` / `for_each` 的子检查列表，可继续嵌套 |
-| `shared_key` | `shared_eq` / `shared_in` / `shared_not_in` / `gt`·`gte`·`lt`·`lte`：`context.shared` 里的取值路径（点分，如 `_query.ids`）；数组写字段名会投影成列表；省略时退化为 `path` / `key` |
-| `require_shared` | `shared_eq` / `shared_in` / `shared_not_in` / `gt`·`gte`·`lt`·`lte`：`True` 时 `shared` 里没有该字段判 ❌，否则只 ℹ️ 跳过 |
+| `shared_key` | `shared_eq` / `shared_in` / `shared_not_in` / `shared_contains` / `gt`·`gte`·`lt`·`lte`：`context.shared` 里的取值路径（点分，如 `_query.ids`）；数组写字段名会投影成列表；省略时退化为 `path` / `key` |
+| `require_shared` | `shared_eq` / `shared_in` / `shared_not_in` / `shared_contains` / `gt`·`gte`·`lt`·`lte`：`True` 时 `shared` 里没有该字段判 ❌，否则只 ℹ️ 跳过 |
 | `null_ok` | `True` 时放行 `null` / 空串 `""`（含父级为 `null`）；在 `for_each` 上还表示「数组字段整体不存在」也放行 |
 | `optional` | `True` 时字段整体缺失只提示、不算失败（随类型变化的可选字段） |
 
@@ -88,6 +88,7 @@ checks = [
 | `shared_eq` | 响应字段 == `onRequest` 写入 `context.shared` 的值 | 任意可寻址字段 |
 | `shared_in` | 响应字段属于 `context.shared` 里的列表（列表接口逐条校验）；响应字段本身是数组时，要求每个元素都属于 | 任意可寻址字段 / 数组 |
 | `shared_not_in` | 响应字段**不属于** `context.shared` 里的列表（排除名单）；响应字段本身是数组时，要求每个元素都不命中 | 任意可寻址字段 / 数组 |
+| `shared_contains` | 响应数组**包含** `context.shared` 里的每个值（响应 ⊇ 请求，允许服务端追加默认项） | `path` 指向数组 / 投影成数组 |
 | `sub_checks` | 对单个对象执行 `sub` 里的一组子检查（可选对象打包用） | `path` 指向单个对象 |
 | `for_each` | 对数组每个元素递归执行 `sub` 里的子检查 | `path` 必须指向数组 |
 
@@ -226,7 +227,7 @@ checks = [
 
 数组里每个元素都必须含某字段；数组为 `null` 或父级为 `null` 视为正常。具体键名以 `reqable_check_core.py` 的实现为准。
 
-**7. 与请求参数比对 → `shared_eq` / `shared_in` / `shared_not_in`**（详见第五节）
+**7. 与请求参数比对 → `shared_eq` / `shared_in` / `shared_not_in` / `shared_contains`**（详见第五节）
 
 ```python
 # 响应回显请求体里的字段（请求体顶层字段已平铺到 shared 根上）
@@ -240,6 +241,10 @@ checks = [
 # 排除名单：返回的 id 不能出现在 ?exclude_ids=9&exclude_ids=10 里
 {"desc": "id 不在排除名单", "kind": "shared_not_in",
  "path": "id", "shared_key": "_query.exclude_ids", "require_shared": True},
+
+# 创建接口：响应必须包含请求传的每个 id（服务端会补默认项，不能要求完全一致）
+{"desc": "event_type_ids 响应包含请求", "kind": "shared_contains",
+ "path": "event_types.id", "shared_key": "event_type_ids", "require_shared": True},
 ```
 
 ### null / 缺失规则（最容易混）
@@ -335,7 +340,7 @@ request url https://.../v2/events/record?event_record_status=False%20Alarm
 shared = {"_query": {"event_record_status": "False Alarm"}, "_query_all": {"event_record_status": ["False Alarm"]}}
 ```
 
-### 2) 清单侧：`shared_eq` / `shared_in` / `shared_not_in`
+### 2) 清单侧：`shared_eq` / `shared_in` / `shared_not_in` / `shared_contains`
 
 | 键 | 指向 |
 | --- | --- |
@@ -346,6 +351,7 @@ shared = {"_query": {"event_record_status": "False Alarm"}, "_query_all": {"even
 - `shared_eq`：响应值 **==** shared 值（请求体回显、单值参数）
 - `shared_in`：响应值 **属于** shared 里的列表（列表接口逐条校验）；响应值是数组时，要求**每个元素都属于**，有一个不在就判 ❌（如 `detail.task_ids` vs 请求的 `ids`）
 - `shared_not_in`：响应值 **不属于** shared 里的列表（**排除名单**，`shared_in` 的反面）；响应值是数组时，要求**每个元素都不命中**，命中一个就判 ❌ 并列出命中项；shared 是空列表 `[]` 时没有可排除的值，打 ℹ️ 视为通过并说明原因
+- `shared_contains`：响应数组 **包含** shared 里的每个值（**响应 ⊇ 请求**，允许服务端多给）；创建类接口必用——服务端会补默认项（如默认 event_types），此时 `shared_in`（每项都属于请求）必然失败；缺少哪几个会直接列出来；shared 是空列表时打 ℹ️ 视为通过
 
 ```python
 # 请求体回显（顶层字段已平铺，可省略 shared_key）
@@ -376,6 +382,10 @@ shared = {"_query": {"event_record_status": "False Alarm"}, "_query_all": {"even
 # 响应数组对排除名单：每个元素都不能命中（如返回的 task_ids 不含已删除的）
 {"desc": "task_ids 不含已排除的 id", "kind": "shared_not_in",
  "path": "detail.task_ids", "shared_key": "_body.exclude_ids", "require_shared": True},
+
+# 创建接口：请求只传了 event_type_ids=[103]，响应多了服务端默认项（15608 / 206 / 207）
+{"desc": "event_type_ids 响应包含请求", "kind": "shared_contains",
+ "path": "event_types.id", "shared_key": "event_type_ids", "require_shared": True},
 ```
 
 输出示例：
@@ -392,6 +402,9 @@ shared = {"_query": {"event_record_status": "False Alarm"}, "_query_all": {"even
 ✅ task_ids 不含已排除的 id: 实际 [144310, 144311]，2 项都不在排除名单
 ❌ task_ids 不含已排除的 id: 实际 [1, 9, 10]，其中 [9, 10] 命中排除名单 [9, 10]
 ℹ️ id 不在排除名单: shared exclude_ids 是空列表，没有可排除的值（视为通过）
+✅ event_type_ids 响应包含请求: 实际 [15608, 206, 103, 207]，请求的 1 项都在响应中
+❌ event_type_ids 响应包含请求: 实际 [15608, 206]，缺少请求中的 [103]
+ℹ️ event_type_ids 响应包含请求: shared event_type_ids 是空列表，没有要求包含的值（视为通过）
 ```
 
 > **类型要一致**：两者都是严格相等。`_query` 已把纯数字转成 `int`，响应是数字就能直接比；响应侧是字符串时改用 `_query_all`（保留字符串类型，不转 `int`，但同样做了 URL 解码）。
