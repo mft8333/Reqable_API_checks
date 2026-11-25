@@ -10,57 +10,67 @@
 #   eq         : 字段值 == 期望值
 #                {"desc","kind","key","value"}         顶层字段
 #                {"desc","kind","path","value"}        嵌套字段(path 点分，数组用下标如 vlms.0.x)
+#                加 "optional": True 时字段【整体不存在】只打 ℹ️；字段在但为 null 照旧按值比较
 #   in_list    : 字段值【属于自己定义的常量集合】（枚举校验：文档里 "Possible values: a, b" 这种）
 #                {"desc","kind","path","value":["operating","non-operating"]}
 #                命中任一项 → ✅；不在集合 → ❌ 并打印实际值与允许集合；严格相等（大小写、类型都不猜）
 #                path 取到数组时要求【每个元素都在】集合里；加 "loose": True 放宽「数字 ↔ 数字字符串」
-#                字段不存在 / 值为 null 默认 ❌，加 "null_ok": True 放行
+#                字段不存在 / 值为 null 默认 ❌；"optional": True 放行缺失，"null_ok": True 放行 null
 #                value 写成空列表 / 不是列表 → 打 ⚠️ 跳过（没有可接受值，不能静默通过）
 #   not_in_list : 字段值【不属于】自己定义的禁止集合（黑名单，in_list 的反面）
 #                {"desc","kind","path","value":["deleted","archived"]}
 #                命中禁值 → ❌ 并打印命中项；不在集合 → ✅；严格相等，加 "loose": True 同样放宽
 #                path 取到数组时要求【每个元素都不命中】；value 写空列表 → ℹ️ 视为通过（没有禁止值）
-#                字段不存在 / 值为 null 默认 ❌，加 "null_ok": True 放行
+#                字段不存在 / 值为 null 默认 ❌；"optional": True 放行缺失，"null_ok": True 放行 null
 #   gt/gte/lt/lte : 大小比较（> >= < <=），要求两边【同为数字】或【同为 ISO 时间串】
 #                {"desc","kind","path","value"}         与常量比
 #                {"desc","kind","path","shared_key"}    与 onRequest 写入的请求值比（二选一，都写时按 shared_key）
 #                时间写法: 2026-05-15 / 2026-05-15T08:00:00Z / 2026-05-15T08:00:36.782976Z
 #                无时区的按 UTC 处理；普通文本不当时间比，"5" 与 5 也不算同类（不做隐式转换）
+#                加 "optional": True 时字段【整体不存在】只打 ℹ️，适合"可选但给了就不能空"的字段
+#                (字段在但为 null 仍 ❌，要放过 null 再写 "null_ok": True)
 #   exists     : 字段是否存在；默认 null 和 ""(空串) 都算错，加 "null_ok": True 放行 null/""(含父级为 null)
 #                ★支持批量: {"desc","kind","fields":[...],"null_ok":True,"optional":True}
 #                fields 一次查多个顶层字段；null_ok 放行 null；optional 允许字段整体缺失(只提示不失败)
 #   list_field : 数组里每个元素都必须含某字段；数组为 null 或父级为 null 视为正常
+#                加 "optional": True 时该数组字段【整体不存在】也放行(可选数组，等价旧写法 null_ok)
 #   shared_eq  : 与 onRequest 写入的 context.shared 比对（如 object_key 是否被改写成 env 值）
 #                {"desc","kind","path","shared_key"}  响应取值用 path/key，shared 取值用 shared_key
 #                shared_key 省略时依次退化为 path / key；context.shared 不可用(测试脚本为 null)时
 #                打印 ℹ️ 跳过、不计失败；加 "require_shared": True 则改为判 ❌
 #                加 "loose": True 时放宽「数字 ↔ 数字字符串」：'3000' 与 3000 视为相等
 #                (422 的 input 是原始字符串、_query.size 已转 int，这种场景必用)；其余类型仍严格
-#                不写 loose 就是严格相等，原有配置行为不变
+#                两边都是数组时逐项按 loose 比：[103] 与 ['103'] 相等，但 [103,17469] 与 ['103']
+#                个数不同仍 ❌（要允许响应多出项，用 shared_contains）；不写 loose 就是严格相等
+#                加 "optional": True 时响应里字段整体不存在只打 ℹ️（字段在但为 null 照旧 ❌）
 #   shared_in  : 响应值【属于】shared 里的列表(列表接口用：返回的每条 id 是否都在请求的 ids 里)
 #                {"desc","kind","path","shared_key"}  取键规则与 shared_eq 完全相同
 #                shared 取到的若不是列表，会自动当成单元素列表比；严格相等，注意类型
 #                path 取到的是数组时，要求【每个元素都属于】请求(如 detail.task_ids vs _body.task_id)
+#                加 "loose": True 时「103 属于 ['103']」也成立（_query_all 的值都是字符串）
 #   shared_not_in : 响应值【不属于】shared 里的列表 —— shared_in 的反面，用于排除名单(黑名单)
 #                {"desc","kind","path","shared_key"}  取键规则与 shared_in 完全相同
 #                path 取到的是数组时，要求【每个元素都不命中】排除名单
 #                shared 取到空列表 [] 时没有可排除的值，打 ℹ️ 视为通过（不会误判通过一堆数据）
 #                shared 取到的若不是列表，同样当成单元素列表比；严格相等，注意类型
+#                同样支持 "loose": True（数字 ↔ 数字字符串互等）
 #   shared_contains : 响应数组【包含】shared 里的每个值（响应 ⊇ 请求，允许服务端追加默认项）
 #                {"desc","kind","path","shared_key"}  取键规则与 shared_in 完全相同
 #                典型场景：创建任务时服务端会补默认 event_types，响应比请求多出几个，
 #                这时 shared_in(每项都属于请求) 必然失败，改用本条只校验「请求的都出现」
+#                加 "loose": True 时 103 与请求里的 '103' 同样算命中
 #                path 必须指向数组(或投影成数组，如 event_types.id)，否则判 ❌ 并提示改用 shared_eq
 #                shared 只有单值时同样要求它出现在响应数组里；空列表 [] 打 ℹ️ 视为通过
 #   sub_checks : 对【单个对象】执行 "sub" 里的多条子检查(可套 top_fields/eq/exists/list_field/for_each)；
 #                {"desc","kind","path","sub":[ ...子检查... ]}  对象为 null / 父级为 null 视为正常
 #                适用「可选对象但字段多」：一条检查打包整组，对象是 null 时整组 ℹ️ 跳过
-#                "path": "." 表示当前对象本身；对象字段整体不存在时加 null_ok: True 放行
+#                "path": "." 表示当前对象本身；对象字段整体不存在时加 "optional": True 放行(旧写法 null_ok 也认)
 #   for_each   : 对【数组】每个元素递归执行 "sub" 里的子检查(可再套 top_fields/list_field/for_each)；
 #                {"desc","kind","path","sub":[ ...子检查... ]}  数组为 null 或父级为 null 视为正常
 #                注意: path 必须指向数组；单个对象请用 sub_checks（或 top_fields + path）
 #                数组套数组时，内层写 "path": "." 表示【当前这个元素本身】(如 detected_objects)
-#                加 "null_ok": True 时，该数组字段【整体不存在】也放行(用于可选数组，如某些项没有 zones)
+#                加 "optional": True 时，该数组字段【整体不存在】也放行(可选数组，如某些项没有 zones)
+#                (旧写法 "null_ok": True 同样认，两者等价；值为 null 本来就视为正常)
 #                加 "label": "id" 时，输出里每条带上该字段值(如 [2] id=206)，便于人工定位是哪个元素；
 #                取不到或值不是标量就退回纯下标，不影响判定结果
 #   整体级      : META_CHECKS 列表，只跑一次、对象是整个响应 data（分页的 page / size / total 等信封字段）
@@ -75,6 +85,13 @@
 #                shared_key 里可写 ${字段}（当前元素）或 ${..字段}（往上一层），用于嵌套配对
 #                (如 "_body.events[id=${..id}|vlm_flow_id=${..id}].zones[id=${id}].coordinates")
 #                写了不属于该 kind 的键(如 exists 里塞 sub)会打 ⚠️，这些键不生效
+#    条件跳过   : 任意 kind 都能加 "when"，条件不成立就整条跳过（ℹ️，不计失败）
+#                {"shared_key": "_query_all.event_type_ids.0", "eq": "other"}   请求侧取值 == 常量
+#                {"shared_key": "_query_all.event_type_ids.0", "numeric": True} 取值是数字
+#                {"shared_key": "_body.ids", "in": ["a", "b"]}                  取值（或数组每项）在集合内
+#                {"path": "status", "eq": "failed"}                             也可用响应字段做条件
+#                可组合，全部成立才算成立；加 "loose": True 同样放宽「数字 ↔ 数字字符串」
+#                取不到条件（shared 没写入等）打 ⚠️ 并跳过，不会误判成 ❌
 # ==============================================================
 
 from reqable import *
@@ -215,6 +232,25 @@ def _null_ancestor(obj, path):
     return False
 
 
+def _optional_skip(c, r, null_ok_too=False):
+    """可选字段整体取不到时放行：optional=True 且【字段不存在 / 父级为 null】→ 打 ℹ️ 返回 True。
+    只管「有没有这个字段」；字段在但值为 null 仍按原逻辑判 ❌（那是 null_ok 的职责），
+    所以 optional 不会把 null / 空值一起放过——「字段可以没有，但给了就不能是空」。
+
+    null_ok_too=True 用于 for_each / sub_checks / list_field / top_fields：这几个 kind 历史上
+    用 null_ok 兼作「字段整体不存在也放行」，这里保留该行为（写哪个键都行，文案按实际写的那个说）。
+    """
+    if not c.get("optional") and not (null_ok_too and c.get("null_ok")):
+        return False
+    why = "optional" if c.get("optional") else "null_ok"
+    path = c.get("path") or c.get("key")
+    if path and _null_ancestor(r, path):
+        print(f"ℹ️ {c['desc']}: 可选字段，父级为 null（{why} 放行）")
+    else:
+        print(f"ℹ️ {c['desc']}: 可选字段 {path or '?'} 不存在（{why} 放行）")
+    return True
+
+
 def _is_empty(v):
     """null 与空字符串 "" 都算“没有值”（exists 默认判失败）。
     注意用 == 而不是 is，避免 0 / False / [] 被误判为空。
@@ -225,6 +261,21 @@ def _is_empty(v):
 def _is_num(v):
     """能参与大小比较的“数字”：int / float，bool 不算（True 会被当成 1 混过去）。"""
     return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _num_like(v):
+    """能当数字用的值：int / float，或纯数字字符串（'103' / '-1' / ' 3.5 '）。
+    给 when 的 numeric 判断用 —— _query_all 里的值全是字符串，只认 int/float 会永远判假。
+    """
+    if _is_num(v):
+        return True
+    if isinstance(v, str):
+        try:
+            float(v.strip())
+            return True
+        except ValueError:
+            return False
+    return False
 
 
 def _to_time(v):
@@ -298,11 +349,15 @@ def _loose_eq(a, b):
     典型场景：422 的 input 是原始字符串 '3000'，而 _query.size 已被转成 int 3000。
     只放宽这一种，其余照旧：'abc' 与 'ABC'、None 与 'None'、[] 与 '' 都不算相等；
     bool 也不参与放宽（True 不等于 1 或 '1'），避免 True 被当成 1 混过去。
+    两边都是列表时逐项按 loose 比（长度须相同、顺序须一致）：
+    [103] 与 ['103'] 视为相等，[103, 17469] 与 ['103'] 仍不相等（个数都不同）。
     """
     if isinstance(a, bool) or isinstance(b, bool):
         return isinstance(a, bool) and isinstance(b, bool) and a == b
     if a == b:
         return True
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_loose_eq(x, y) for x, y in zip(a, b))
 
     def num(v):
         if isinstance(v, (int, float)):
@@ -321,6 +376,13 @@ def _loose_eq(a, b):
     return na is not None and nb is not None and na == nb
 
 
+def _loose_has(seq, v, loose=False):
+    """v 是否出现在 seq 里；loose 时按 _loose_eq 逐项比（103 命中 ['103']）。"""
+    if not loose:
+        return v in seq
+    return any(_loose_eq(x, v) for x in seq)
+
+
 def _shared_or_skip(c, ctx, skey, cur, stack):
     """取 shared 值；取不到时按 require_shared 判 ❌ 还是 ℹ️ 跳过。返回 (是否取到, 值, 失败数)。"""
     exists, want, err = _shared_value(ctx, skey, cur, stack)
@@ -335,25 +397,72 @@ def _shared_or_skip(c, ctx, skey, cur, stack):
 
 
 # 每种 kind 允许的键（用于提示「写了不支持的键」）
-_COMMON_KEYS = {"desc", "kind", "path", "key"}
+_COMMON_KEYS = {"desc", "kind", "path", "key", "when"}
 _KIND_KEYS = {
     "top_fields": {"fields", "null_ok", "optional"},
-    "eq": {"value"},
-    "in_list": {"value", "null_ok", "loose"},
-    "not_in_list": {"value", "null_ok", "loose"},
-    "gt": {"value", "null_ok", "shared_key", "require_shared"},
-    "gte": {"value", "null_ok", "shared_key", "require_shared"},
-    "lt": {"value", "null_ok", "shared_key", "require_shared"},
-    "lte": {"value", "null_ok", "shared_key", "require_shared"},
+    "eq": {"value", "optional"},
+    "in_list": {"value", "null_ok", "loose", "optional"},
+    "not_in_list": {"value", "null_ok", "loose", "optional"},
+    "gt": {"value", "null_ok", "shared_key", "require_shared", "optional"},
+    "gte": {"value", "null_ok", "shared_key", "require_shared", "optional"},
+    "lt": {"value", "null_ok", "shared_key", "require_shared", "optional"},
+    "lte": {"value", "null_ok", "shared_key", "require_shared", "optional"},
     "exists": {"fields", "null_ok", "optional"},
-    "list_field": {"field"},
-    "for_each": {"sub", "null_ok", "label"},
-    "sub_checks": {"sub", "null_ok"},
-    "shared_eq": {"shared_key", "require_shared", "loose"},
-    "shared_in": {"shared_key", "require_shared"},
-    "shared_not_in": {"shared_key", "require_shared"},
-    "shared_contains": {"shared_key", "require_shared"},
+    "list_field": {"field", "optional", "null_ok"},
+    "for_each": {"sub", "null_ok", "label", "optional"},
+    "sub_checks": {"sub", "null_ok", "optional"},
+    "shared_eq": {"shared_key", "require_shared", "loose", "optional"},
+    "shared_in": {"shared_key", "require_shared", "loose"},
+    "shared_not_in": {"shared_key", "require_shared", "loose"},
+    "shared_contains": {"shared_key", "require_shared", "loose"},
 }
+
+
+def _when_ok(spec, ctx, r, stack):
+    """判断 when 守卫是否成立，返回 (True/False/None, 说明)。None 表示条件取不到，按跳过处理。
+
+    写法（只认三种判断，可组合，组合时全部成立才算成立）：
+        {"shared_key": "_query_all.event_type_ids.0", "eq": "other"}   请求侧取值 == 常量
+        {"shared_key": "_body.ids", "in": ["a", "b"]}                  取值（或数组每个元素）在集合内
+        {"shared_key": "_query_all.size.0", "numeric": True}           取值能当数字用（数字 / 纯数字字符串）
+        {"path": "status", "eq": "failed"}                             也可以用响应字段做条件
+    加 "loose": True 时同样放宽「数字 ↔ 数字字符串」。
+    """
+    if not isinstance(spec, dict):
+        return None, "when 需要写成对象"
+    skey = spec.get("shared_key")
+    if skey:
+        exists, val, err = _shared_value(ctx, skey, r, stack)
+        where = f"shared {skey}"
+    else:
+        p = spec.get("path") or spec.get("key")
+        if not p:
+            return None, "when 需要 shared_key 或 path"
+        exists, val = _get_value(r, {"path": p})
+        where = p
+    if not exists:
+        return None, f"when 取不到 {where}"
+
+    loose = bool(spec.get("loose"))
+    ops = 0
+    ok = True
+    if "eq" in spec:
+        ops += 1
+        ok = ok and (_loose_eq(val, spec["eq"]) if loose else val == spec["eq"])
+    if "in" in spec:
+        ops += 1
+        allow = spec["in"] if isinstance(spec["in"], list) else [spec["in"]]
+        vals = val if isinstance(val, list) else [val]
+        ok = ok and all(_loose_has(allow, v, loose) for v in vals)
+    if "numeric" in spec:
+        ops += 1
+        vals = val if isinstance(val, list) else [val]
+        is_num = bool(vals) and all(_num_like(v) for v in vals)
+        ok = ok and (is_num == bool(spec["numeric"]))
+    if not ops:
+        return None, "when 里没有可识别的条件（eq / in / numeric）"
+    shown = _brief(val) if isinstance(val, list) else repr(val)
+    return ok, f"{where} = {shown}"
 
 
 def _run_check(r, c, ctx=None, stack=None):
@@ -363,6 +472,16 @@ def _run_check(r, c, ctx=None, stack=None):
     """
     kind = c["kind"]
     stack = stack or []
+
+    # 条件守卫：when 不成立就整条跳过（ℹ️，不计失败），用于「同一份清单覆盖多种请求参数」
+    if c.get("when") is not None:
+        ok, why = _when_ok(c["when"], ctx, r, stack)
+        if ok is None:
+            print(f"⚠️ {c['desc']}: {why}，本条跳过（没在检查）")
+            return 0
+        if not ok:
+            print(f"ℹ️ {c['desc']}: when 条件不成立（{why}），跳过")
+            return 0
 
     # 写了不属于该 kind 的键（比如 exists 里塞 sub）会被静默忽略 → 这条等于没检查，先提示出来
     extra = [k for k in c if k not in _COMMON_KEYS and k not in _KIND_KEYS.get(kind, set())]
@@ -408,6 +527,8 @@ def _run_check(r, c, ctx=None, stack=None):
 
     elif kind == "eq":
         exists, actual = _get_value(r, c)
+        if not exists and _optional_skip(c, r):
+            return 0
         ok = exists and actual == c["value"]
         print(f"{'✅' if ok else '❌'} {c['desc']}: 实际 {actual!r} / 期望 {c['value']!r}")
         return 0 if ok else 1
@@ -424,6 +545,8 @@ def _run_check(r, c, ctx=None, stack=None):
             return 0
         exists, actual = _get_value(r, c)
         if not exists:
+            if _optional_skip(c, r):
+                return 0
             if c.get("null_ok"):
                 print(f"ℹ️ {c['desc']}: 字段不存在（null_ok 放行）")
                 return 0
@@ -466,6 +589,8 @@ def _run_check(r, c, ctx=None, stack=None):
             return 0
         exists, actual = _get_value(r, c)
         if not exists:
+            if _optional_skip(c, r):
+                return 0
             if c.get("null_ok"):
                 print(f"ℹ️ {c['desc']}: 字段不存在（null_ok 放行）")
                 return 0
@@ -517,14 +642,20 @@ def _run_check(r, c, ctx=None, stack=None):
             want, label = c["value"], "期望"
         exists, actual = _get_value(r, c)
         if not exists:
+            if _optional_skip(c, r):
+                return 0
             if c.get("null_ok"):
                 print(f"ℹ️ {c['desc']}: 字段不存在（null_ok 放行）")
                 return 0
             print(f"❌ {c['desc']}: 字段 {c.get('path') or c.get('key')} 不存在")
             return 1
-        if actual is None and c.get("null_ok"):
-            print(f"ℹ️ {c['desc']}: 值为 null（null_ok 放行）")
-            return 0
+        if actual is None:
+            if c.get("null_ok"):
+                print(f"ℹ️ {c['desc']}: 值为 null（null_ok 放行）")
+                return 0
+            # optional 只放行「字段没有」，字段给了 null 就是空值，仍算错
+            print(f"❌ {c['desc']}: 实际 null，比较需要具体值（可选字段也要求非空）")
+            return 1
         if _is_num(actual) and _is_num(want):
             a_v, w_v, tag = actual, want, ""
         else:
@@ -587,6 +718,8 @@ def _run_check(r, c, ctx=None, stack=None):
         if not sh_exists:
             return _skip
         exists, actual = _get_value(r, c)
+        if not exists and _optional_skip(c, r):
+            return 0
         loose = bool(c.get("loose"))
         ok = exists and (_loose_eq(actual, want) if loose else actual == want)
         tail = "（按 loose 视为相等）" if loose and ok and actual != want else ""
@@ -603,21 +736,23 @@ def _run_check(r, c, ctx=None, stack=None):
         if not sh_exists:
             return _skip
         allow = want if isinstance(want, list) else [want]
+        loose = bool(c.get("loose"))
         exists, actual = _get_value(r, c)
         if not exists:
             where = c.get("path") or c.get("key") or "?"
-            print(f"❌ {c['desc']}: 取不到 {where}（字段不存在或路径写错）")
+            print(f"❌ {c['desc']}: 取不到 {where}（字段不存在 / 数组为空 / 路径写错）")
             return 1
         if isinstance(actual, list):                # 响应侧也是数组：要求每个元素都属于请求
-            bad = [x for x in actual if x not in allow]
+            bad = [x for x in actual if not _loose_has(allow, x, loose)]
             ok = not bad
             if ok:
                 print(f"✅ {c['desc']}: 实际 {_brief(actual)}，{len(actual)} 项都属于请求")
             else:
                 print(f"❌ {c['desc']}: 实际 {_brief(actual)}，其中 {_brief(bad)} 不在请求消息 {_brief(allow)} 中")
             return 0 if ok else 1
-        ok = exists and actual in allow
-        tail = "" if ok else f"，不在请求消息 {allow!r} 中"
+        ok = exists and _loose_has(allow, actual, loose)
+        tail = "（按 loose 视为命中）" if ok and loose and actual not in allow else ""
+        tail = tail or ("" if ok else f"，不在请求消息 {allow!r} 中")
         print(f"{'✅' if ok else '❌'} {c['desc']}: 实际 {actual!r}{tail}")
         return 0 if ok else 1
 
@@ -631,26 +766,28 @@ def _run_check(r, c, ctx=None, stack=None):
         if not sh_exists:
             return _skip
         deny = want if isinstance(want, list) else [want]
+        loose = bool(c.get("loose"))
         if not deny:                                # 空名单：没有可排除的值，说清楚而不是假装检查过
             print(f"ℹ️ {c['desc']}: shared {skey} 是空列表，没有可排除的值（视为通过）")
             return 0
         exists, actual = _get_value(r, c)
         if not exists:
             where = c.get("path") or c.get("key") or "?"
-            print(f"❌ {c['desc']}: 取不到 {where}（字段不存在或路径写错）")
+            print(f"❌ {c['desc']}: 取不到 {where}（字段不存在 / 数组为空 / 路径写错）")
             return 1
         if isinstance(actual, list):                # 响应侧也是数组：要求每个元素都不命中排除名单
-            bad = [x for x in actual if x in deny]
+            bad = [x for x in actual if _loose_has(deny, x, loose)]
             ok = not bad
             if ok:
                 print(f"✅ {c['desc']}: 实际 {_brief(actual)}，{len(actual)} 项都不在排除名单")
             else:
                 print(f"❌ {c['desc']}: 实际 {_brief(actual)}，其中 {_brief(bad)} 命中排除名单 {_brief(deny)}")
             return 0 if ok else 1
-        ok = actual not in deny
-        tail = "" if ok else f"，命中排除名单 {deny!r}"
-        print(f"{'✅' if ok else '❌'} {c['desc']}: 实际 {actual!r}{tail}")
-        return 0 if ok else 1
+        bad = _loose_has(deny, actual, loose)
+        tail = "（按 loose 视为命中）" if bad and loose and actual not in deny else ""
+        tail = tail or ("" if not bad else f"，命中排除名单 {deny!r}")
+        print(f"{'✅' if not bad else '❌'} {c['desc']}: 实际 {actual!r}{tail}")
+        return 0 if not bad else 1
 
     elif kind == "shared_contains":
         # 响应数组【包含】shared 里的每个值（响应 ⊇ 请求）：服务端会追加默认项时用这条
@@ -668,13 +805,13 @@ def _run_check(r, c, ctx=None, stack=None):
         exists, actual = _get_value(r, c)
         if not exists:
             where = c.get("path") or c.get("key") or "?"
-            print(f"❌ {c['desc']}: 取不到 {where}（字段不存在或路径写错）")
+            print(f"❌ {c['desc']}: 取不到 {where}（字段不存在 / 数组为空 / 路径写错）")
             return 1
         if not isinstance(actual, list):
             print(f"❌ {c['desc']}: path 需指向数组，实际 {actual!r}（{type(actual).__name__}）；"
                   f"单个值请改用 shared_eq")
             return 1
-        missing = [x for x in need if x not in actual]
+        missing = [x for x in need if not _loose_has(actual, x, bool(c.get("loose")))]
         ok = not missing
         if ok:
             print(f"✅ {c['desc']}: 实际 {_brief(actual)}，请求的 {len(need)} 项都在响应中")
@@ -694,8 +831,7 @@ def _run_check(r, c, ctx=None, stack=None):
             if "path" in c and _null_ancestor(r, c["path"]):
                 print(f"ℹ️ {c['desc']}: 父级为 null（视为正常）")
                 return 0
-            if c.get("null_ok"):
-                print(f"ℹ️ {c['desc']}: 字段不存在（null_ok 放行）")
+            if _optional_skip(c, r, null_ok_too=True):   # optional / null_ok 都放行“数组整体不存在”
                 return 0
             print(f"❌ {c['desc']}: 字段 {c.get('path') or c.get('key')} 不存在")
             return 1
@@ -722,8 +858,7 @@ def _run_check(r, c, ctx=None, stack=None):
             if "path" in c and _null_ancestor(r, c["path"]):
                 print(f"ℹ️ {c['desc']}: 父级为 null（视为正常）")
                 return 0
-            if c.get("null_ok"):
-                print(f"ℹ️ {c['desc']}: 字段不存在（null_ok 放行）")
+            if _optional_skip(c, r, null_ok_too=True):   # optional / null_ok 都放行“数组整体不存在”
                 return 0
             print(f"❌ {c['desc']}: 字段 {c.get('path') or c.get('key')} 不存在")
             return 1
@@ -773,8 +908,7 @@ def _run_check(r, c, ctx=None, stack=None):
             if c.get("path") and _null_ancestor(r, c["path"]):
                 print(f"ℹ️ {c['desc']}: 父级为 null（视为正常）")
                 return 0
-            if c.get("null_ok"):
-                print(f"ℹ️ {c['desc']}: 字段不存在（null_ok 放行）")
+            if _optional_skip(c, r, null_ok_too=True):   # optional / null_ok 都放行“对象整体不存在”
                 return 0
             print(f"❌ {c['desc']}: 字段 {c['path']} 不存在")
             return 1

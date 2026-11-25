@@ -71,10 +71,11 @@ checks = [
 | `sub` | `sub_checks` / `for_each` 的子检查列表，可继续嵌套 |
 | `shared_key` | `shared_eq` / `shared_in` / `shared_not_in` / `shared_contains` / `gt`·`gte`·`lt`·`lte`：`context.shared` 里的取值路径（点分，如 `_query.ids`）；数组写字段名会投影成列表；省略时退化为 `path` / `key` |
 | `require_shared` | `shared_eq` / `shared_in` / `shared_not_in` / `shared_contains` / `gt`·`gte`·`lt`·`lte`：`True` 时 `shared` 里没有该字段判 ❌，否则只 ℹ️ 跳过 |
-| `null_ok` | `True` 时放行 `null` / 空串 `""`（含父级为 `null`）；在 `for_each` 上还表示「数组字段整体不存在」也放行；在 `top_fields` 上表示「空对象 `{}` / 空数组 `[]`」也放行（`null` 本来就不算失败） |
-| `optional` | `True` 时字段整体缺失只提示、不算失败（随类型变化的可选字段）；在 `top_fields` 上表示「可选子对象整体不存在」也放行（只在写了 `path` 时有意义） |
-| `loose` | 仅 `shared_eq`：`True` 时放宽「数字 ↔ 数字字符串」（`'3000'` 与 `3000` 相等），其余类型仍严格；不写即严格相等 |
+| `null_ok` | `True` 时放行 `null` / 空串 `""`（含父级为 `null`）；在 `for_each` / `list_field` / `sub_checks` 上还表示「字段整体不存在」也放行（等价于 `optional`）；在 `top_fields` 上表示「空对象 `{}` / 空数组 `[]`」也放行（`null` 本来就不算失败） |
+| `optional` | `True` 时字段整体缺失只提示、不算失败（随类型变化的可选字段）。容器类也认：`top_fields`（可选子对象）、`for_each` / `list_field`（可选数组）、`sub_checks`（可选对象），以及比较类 `eq` / `in_list` / `not_in_list` / `shared_eq` / `gt`·`gte`·`lt`·`lte`——**只放行「东西没有」，值为 `null` 仍按原逻辑判错**。`for_each` / `list_field` / `sub_checks` 上的旧写法 `null_ok` 等价保留 |
+| `loose` | `shared_eq` / `shared_in` / `shared_not_in` / `shared_contains` / `in_list` / `not_in_list`：`True` 时放宽「数字 ↔ 数字字符串」（`'3000'` 与 `3000` 相等），其余类型仍严格；**两边都是数组时逐项放宽**（`[103]` 与 `['103']` 相等，长度、顺序仍须一致）；不写即严格相等 |
 | `label` | 仅 `for_each`：输出里每条带上该字段的值（`"label": "id"` → `[2] id=206`），纯显示用、不影响判定；取不到或值不是标量时退回纯下标 |
+| `when` | **任意 kind 都能加**：条件不成立就整条跳过（ℹ️，不计失败），一份清单覆盖多种请求参数。写法见「3.6 条件检查」 |
 
 > 每个 `kind` 只认自己的键。写了它不支持的键（例如给 `exists` 塞 `sub`）不会报错，但那个键**不生效**，引擎会打一行 `⚠️ kind=exists 不支持 ['sub']，这些键被忽略`——看到这个提示说明这条多半没在检查你以为的内容。
 
@@ -88,13 +89,13 @@ checks = [
 | `not_in_list` | 字段值**不属于**自定义的禁止集合（黑名单，命中即失败；`in_list` 的反面） | 任意可寻址字段 / 数组（逐项） |
 | `gt` / `gte` / `lt` / `lte` | 大小比较（`>` / `>=` / `<` / `<=`），两边同为数字或同为 ISO 时间串 | 任意可寻址字段（值为数字 / 时间串） |
 | `exists` | 字段是否存在（默认严格，`null` 或 `""` 也判失败） | 单个或批量顶层字段 |
-| `list_field` | 数组里每个元素都必须含某字段 | `path` 指向数组 |
+| `list_field` | 数组里每个元素都必须含某字段（可选数组配 `optional`） | `path` 指向数组 |
 | `shared_eq` | 响应字段 == `onRequest` 写入 `context.shared` 的值（`loose: True` 时数字与数字字符串互等） | 任意可寻址字段 |
-| `shared_in` | 响应字段属于 `context.shared` 里的列表（列表接口逐条校验）；响应字段本身是数组时，要求每个元素都属于 | 任意可寻址字段 / 数组 |
-| `shared_not_in` | 响应字段**不属于** `context.shared` 里的列表（排除名单）；响应字段本身是数组时，要求每个元素都不命中 | 任意可寻址字段 / 数组 |
-| `shared_contains` | 响应数组**包含** `context.shared` 里的每个值（响应 ⊇ 请求，允许服务端追加默认项） | `path` 指向数组 / 投影成数组 |
-| `sub_checks` | 对单个对象执行 `sub` 里的一组子检查（可选对象打包用） | `path` 指向单个对象 |
-| `for_each` | 对数组每个元素递归执行 `sub` 里的子检查；`label` 可让输出带上元素 id | `path` 必须指向数组 |
+| `shared_in` | 响应字段属于 `context.shared` 里的列表（列表接口逐条校验）；响应字段本身是数组时，要求每个元素都属于；`loose: True` 时 `103` 属于 `['103']` | 任意可寻址字段 / 数组 |
+| `shared_not_in` | 响应字段**不属于** `context.shared` 里的列表（排除名单）；响应字段本身是数组时，要求每个元素都不命中；同样支持 `loose` | 任意可寻址字段 / 数组 |
+| `shared_contains` | 响应数组**包含** `context.shared` 里的每个值（响应 ⊇ 请求，允许服务端追加默认项）；`loose: True` 逐项放宽类型 | `path` 指向数组 / 投影成数组 |
+| `sub_checks` | 对单个对象执行 `sub` 里的一组子检查（可选对象打包用；`optional` 放行对象不存在） | `path` 指向单个对象 |
+| `for_each` | 对数组每个元素递归执行 `sub` 里的子检查；`optional` 放行可选数组，`label` 可让输出带上元素 id | `path` 必须指向数组 |
 
 ### 写法示例
 
@@ -142,7 +143,7 @@ checks = [
  "path": "camera.coordinates", "fields": ["latitude", "longitude"]},
 ```
 
-`sub_checks` 的三种边界：对象为 `null` → 整组 ℹ️ 跳过；字段整体不存在 → 默认 ❌，加 `null_ok: True` 放行；对象不是 dict（是数组/字符串）→ ❌ 并提示改用 `for_each`。`path` 写 `"."` 或省略表示当前对象本身。
+`sub_checks` 的三种边界：对象为 `null` → 整组 ℹ️ 跳过；对象整体不存在 → 默认 ❌，加 `optional: True`（旧写法 `null_ok: True`）放行；对象不是 dict（是数组/字符串）→ ❌ 并提示改用 `for_each`。`path` 写 `"."` 或省略表示当前对象本身。
 
 **2.5 可选子对象 → `top_fields` + `optional` / `null_ok`**
 
@@ -164,12 +165,31 @@ checks = [
 
 ```python
 {"desc": "model_settings", "kind": "sub_checks", "path": "model_settings",
- "null_ok": True, "sub": [
+ "optional": True, "sub": [
     {"desc": "必需字段", "kind": "top_fields", "fields": ["id", "name", "version"]},
     {"desc": "scheduler 可选子对象", "kind": "top_fields", "path": "scheduler",
      "fields": ["id", "name"], "optional": True},
 ]},
 ```
+
+**2.6 可选对象 / 可选数组：容器类检查统一用 `optional`**
+
+四类容器都认同一个键，缺东西就打 ℹ️，不再 ❌：
+
+| 检查对象 | kind | 放行「整体不存在」 | 备注 |
+| --- | --- | --- | --- |
+| 子对象 | `top_fields` + `path` | `optional: True` | `null_ok` 在这里表示「空对象 `{}` / 空数组 `[]`」 |
+| 单个对象打包 | `sub_checks` | `optional: True` | 对象为 `null` 本来就整组跳过 |
+| 数组 | `for_each` | `optional: True` | 旧写法 `null_ok` 等价；元素本身为 `null` 的元素仍会报错 |
+| 数组（只看字段在不在） | `list_field` | `optional: True` | 旧写法 `null_ok` 等价 |
+
+```python
+{"desc": "zones 列表", "kind": "for_each", "path": "zones", "optional": True, "sub": [
+    {"desc": "必需字段", "kind": "top_fields", "fields": ["id", "name", "geometry"]},
+]},
+```
+
+> 不写 `optional` 时「东西不存在」照旧 ❌——这是故意的，否则 `path` 拼错（`zzones`）也会静默通过。数组/对象的值本身为 `null` 时仍按原行为视为正常（`sub_checks` 整组跳过、`for_each` 打 ℹ️）。
 
 **3. 固定值断言 → `eq`（两种写法）**
 
@@ -178,6 +198,29 @@ checks = [
  "path": "location.timezone", "value": "Asia/Taipei"},          # 嵌套写法
 {"desc": "某顶层字段应为 X", "kind": "eq", "key": "task_status", "value": "active"},  # 顶层写法
 ```
+
+**3.1 可选但给了就不能空 → 任意比较类检查 + `optional`**
+
+有些字段是**可选**的：这条记录可能压根没有 `detecting_threshold`，但**一旦出现就必须是合法值**（不能 `null`、不能空串）。这种就写 `optional`：
+
+```python
+{"desc": "信心阈值 >= 0", "kind": "gte", "path": "detecting_threshold",
+ "value": 0, "optional": True},
+{"desc": "信心阈值 <= 1", "kind": "lte", "path": "detecting_threshold",
+ "value": 1, "optional": True},
+```
+
+| 响应里的情况 | 不写 `optional` | `optional: True` |
+| --- | --- | --- |
+| 字段没有（整条记录没这个键） | ❌ | ℹ️ `可选字段 detecting_threshold 不存在（optional 放行）` |
+| 父级对象为 `null`（路径走不到） | ❌ | ℹ️ `可选字段，父级为 null（optional 放行）` |
+| `"detecting_threshold": 0.9` | 正常比较 | 正常比较 |
+| `"detecting_threshold": null` | ❌ | **❌**（`optional` 不放行 null） |
+| `"detecting_threshold": ""` | ❌ | **❌**（`optional` 不放行空串） |
+
+支持的 kind：`eq` / `in_list` / `not_in_list` / `shared_eq` / `gt` / `gte` / `lt` / `lte`（`top_fields` / `exists` 上的 `optional` 是同一个含义）。
+
+> 一句话区分：**`optional` 管「有没有这个字段」，`null_ok` 管「值是不是 null / 空串」。** 想让 `null` 也放过，两个都写；只写 `optional` 就是「可以没有，给了就不能空」。这也意味着——数据里如果是 `"detecting_threshold": null` 而不是整个键缺失，`optional` 抓不住它，还会照旧 ❌。真遇到这种要先看清是「字段没给」还是「给了个空值」。
 
 **3.2 取值范围 / 枚举 → `in_list`**（值必须属于你自己列的常量集合，命中任一即通过）
 
@@ -198,6 +241,9 @@ checks = [
 
 - **严格相等**：`Operating` ≠ `operating`，`"384"` ≠ `384`——文档里写什么就抄什么。字符串数字枚举
   （`"384"` / `"576"`）要么按文档写字符串，要么加 `"loose": True` 让数字与数字字符串互等；
+- **允许值只按接口文档写**：文档枚举要一条不落，但**别拿"实际返回过"的值去补**。真出现文档外的值
+  （如只有 `operating` / `non-operating` 却返回了 `Unknown`），那是问题本身——要么文档漏了状态，
+  要么服务端吐了异常值；把它塞进列表只是把红灯糊成绿灯。确属中间态/兜底值，再改文档、再补列表。
 - `path` 投影成数组时（如 `event_types.polygon_type`）要求**每个元素都在**集合里，失败会列出具体哪几项；
 - 字段不存在、值为 `null` 都判 ❌，加 `"null_ok": True` 放行（`{}` / `[]` 这类空值见上节规则）；
 - `value` 写成空列表 `[]` 或不是列表 → 打 `⚠️` 跳过，不会静默"全部通过"；
@@ -255,6 +301,44 @@ checks = [
   两个都写时按 `shared_key` 比较并打 ⚠️；`shared` 里没有该键默认 ℹ️ 跳过，加 `require_shared: True` 改判 ❌；
 - 区间用两条（`gte` + `lte`），引擎没有 `between`；
 - 字段缺失判 ❌，值为 `null` 也判 ❌，两种情况都可以加 `"null_ok": True` 放行。
+
+**3.6 条件检查 → `when`**（任意 kind 都能加；条件不成立就整条跳过，ℹ️ 不计失败）
+
+同一个接口常被不同参数访问（`?event_type_ids=103` 与 `?event_type_ids=other`），要求各不相同。
+`when` 让一条检查只在特定条件下生效，一份清单就能覆盖多种参数组合：
+
+```python
+# 数字过滤：响应每条只需包含该 event_type（可能还有别的）
+{"desc": "event_type_ids 响应与请求检查", "kind": "shared_contains",
+ "path": "event_types.event_type_id", "shared_key": "_query_all.event_type_ids", "loose": True,
+ "when": {"shared_key": "_query_all.event_type_ids.0", "numeric": True}},
+
+# 关键字过滤 other：这类图片不带 event_type，响应 event_types 应为空
+{"desc": "other 过滤时 event_types 应为空", "kind": "eq", "path": "event_types", "value": [],
+ "when": {"shared_key": "_query_all.event_type_ids.0", "eq": "other"}},
+```
+
+```
+?event_type_ids=103   → ✅ 响应包含请求的 event_type: 实际 [103]，请求的 1 项都在响应中
+                        ℹ️ other 过滤时 event_types 应为空: when 条件不成立（shared _query_all.event_type_ids.0 = '103'），跳过
+?event_type_ids=other → ℹ️ 响应包含请求的 event_type: when 条件不成立（… = 'other'），跳过
+                        ✅ other 过滤时 event_types 应为空: 实际 [] / 期望 []
+```
+
+条件怎么写（`shared_key` 取请求侧，`path` 取响应侧）：
+
+| 判断 | 例子 | 成立条件 |
+| --- | --- | --- |
+| `eq` | `{"shared_key": "_query_all.event_type_ids.0", "eq": "other"}` | 取值 == 常量 |
+| `in` | `{"shared_key": "_query_all.event_type_ids", "in": ["103", "207"]}` | 取值（或数组每项）都在集合内 |
+| `numeric` | `{"shared_key": "_query_all.event_type_ids.0", "numeric": True}` | 能当数字用（`'103'` 算，`'other'` 不算）；写 `false` 表示反过来 |
+| 用响应字段 | `{"path": "status", "eq": "failed"}` | 响应里该字段等于常量 |
+
+- 多个判断写在一起是**且**关系，全部成立才执行；加 `"loose": True` 同样放宽「数字 ↔ 数字字符串」。
+- 条件**取不到**（`shared` 没写入、字段不存在）打 `⚠️ … 本条跳过（没在检查）`，不会判断成 ❌——
+  免得 `onRequest` 没生效时一片假红。
+- `when` 放在 `for_each` / `sub_checks` 上时按元素逐个判断（外层元素也能用 `${..字段}`）。
+- 断言「数组为空」直接用 `eq` + `"value": []`，不需要额外的 kind。
 
 **4. 严格存在性 → `exists`**（默认 `null` 与空串 `""` 都判失败；`null_ok: True` 才放行）
 
@@ -345,14 +429,14 @@ checks = [
 | `top_fields` 查的子对象为 `{}` / `[]` | 默认 ❌（字段全缺），`null_ok: True` 放行 |
 | `top_fields` 查的子对象**整体不存在** | 默认 ❌，`optional: True` 放行 |
 | `sub_checks` 指向的对象为 `null` / 父级为 `null` | 整组 ℹ️ 跳过，不计失败 |
-| `sub_checks` 指向的字段整体不存在 | 默认 ❌，`null_ok: True` 才放行 |
+| `sub_checks` 指向的字段整体不存在 | 默认 ❌，`optional: True`（旧写法 `null_ok: True`）放行 |
 | `list_field` / `for_each` 的数组为 `null` / 父级为 `null` | 视为正常 |
 | `exists` 字段值为 `null` 或 `""` | 默认**判失败**，`null_ok: True` 才放行 |
 | `exists` 字段值为 `0` / `false` / `[]` | 正常，不算空值 |
-| `for_each` 的数组字段**整体不存在** | 加 `null_ok: True` 才放行 |
+| `for_each` / `list_field` 的数组字段**整体不存在** | 默认 ❌，`optional: True`（旧写法 `null_ok: True`）放行 |
 | `optional: True` 的字段整体缺失 | 只提示，不算失败 |
 
-一句话：`null_ok` 管「值是 null / 空串（对象则为 `{}`）」，`optional` 管「字段压根没有」。
+一句话：`null_ok` 管「值是 null / 空串（对象则为 `{}`）」，`optional` 管「东西压根没有」；容器类（对象 / 数组）两者都认，比较类只认 `optional`。
 
 ### 整体级检查：`META_CHECKS`（分页 `page` / `size` / `total`）
 
@@ -443,10 +527,13 @@ shared = {"_query": {"event_record_status": "False Alarm"}, "_query_all": {"even
 - `shared_eq`：响应值 **==** shared 值（请求体回显、单值参数）；类型严格，`'3000'` 与 `3000` 不相等
   - 唯一例外是显式加 `"loose": True`：只放宽「数字 ↔ 数字字符串」这一种，`'3000'` 与 `3000`、`'-1'` 与 `-1`、`'3.0'` 与 `3` 算相等
   - 不放宽的部分：`'abc'` 与 `'ABC'`、`None` 与 `'None'`、`[]` 与 `''` 仍判不相等；`bool` 不参与（`True` 不等于 `1` / `'1'`）
+  - **两边都是数组时逐项放宽**：`path` 投影成数组（如 `event_types.event_type_id` → `[103]`）对 `_query_all` 的 `['103']` 算相等；长度不同、顺序不同仍判 ❌——`[103, 17469]` 对 `['103']` 该用 `shared_contains`
   - 放宽生效时输出会追一句，便于识别：`✅ …: 实际 '3000' / 请求中携带的 3000（按 loose 视为相等）`
 - `shared_in`：响应值 **属于** shared 里的列表（列表接口逐条校验）；响应值是数组时，要求**每个元素都属于**，有一个不在就判 ❌（如 `detail.task_ids` vs 请求的 `ids`）
 - `shared_not_in`：响应值 **不属于** shared 里的列表（**排除名单**，`shared_in` 的反面）；响应值是数组时，要求**每个元素都不命中**，命中一个就判 ❌ 并列出命中项；shared 是空列表 `[]` 时没有可排除的值，打 ℹ️ 视为通过并说明原因
 - `shared_contains`：响应数组 **包含** shared 里的每个值（**响应 ⊇ 请求**，允许服务端多给）；创建类接口必用——服务端会补默认项（如默认 event_types），此时 `shared_in`（每项都属于请求）必然失败；缺少哪几个会直接列出来；shared 是空列表时打 ℹ️ 视为通过
+- 这三条与 `shared_eq` 一样认 `"loose": True`：`_query_all` 里的值全是字符串，响应是数字时（`103` vs `'103'`）不加 loose 判不过
+- 同一接口被不同参数访问时，用 `when` 让检查只在对应参数下生效（见「3.6 条件检查」）
 
 ```python
 # 请求体回显（顶层字段已平铺，可省略 shared_key）
@@ -464,6 +551,12 @@ shared = {"_query": {"event_record_status": "False Alarm"}, "_query_all": {"even
 # 不想放宽类型就去取原始字符串，效果一样
 {"desc": "input 与请求参数一致", "kind": "shared_eq",
  "path": "detail.0.input", "shared_key": "_query_all.size.0", "require_shared": True},
+
+# 过滤接口：?event_type_ids=103 返回的图片，event_types 里可能还带别的类型
+#   响应投影 [103] / [103, 17469]，请求侧 _query_all 是 ['103'] → 用 shared_contains + loose
+#   这里千万别用 shared_eq：它要求两边一模一样，[103, 17469] 永远过不了
+{"desc": "event_type_ids 响应与请求检查", "kind": "shared_contains",
+ "path": "event_types.event_type_id", "shared_key": "_query_all.event_type_ids", "loose": True},
 
 # 列表接口：?ids=1&ids=2 返回 {"total":2,"results":[...]}，逐条判归属
 {"desc": "每条 id 都属于请求的 ids", "kind": "shared_in",
@@ -699,9 +792,9 @@ def onRequest(context, request):
 2. **单个对象不能用 `for_each`**：`camera` / `location` / `cluster` / `scheduler` 都是对象，用 `sub_checks`（字段多、对象可空时）或 `top_fields` + `path`（字段少时）；`for_each` 的 `path` 必须指向数组，否则会报错。
 3. **数组套数组要两层 `for_each`**：`event_types` → `zones`；可选数组记得加 `null_ok: True`。
 4. **path 数组下标**：点分 + 数字下标，如 `vlms.0.x`。
-5. **`null_ok` vs `optional`**：前者放行 null / 空串值，后者放行字段整体缺失。
+5. **`null_ok` vs `optional`**：前者放行 null / 空串值，后者放行「东西整体没有」。容器类（`top_fields` / `sub_checks` / `for_each` / `list_field`）两者都认，比较类（`eq` / `in_list` / `not_in_list` / `shared_eq` / `gt`·`gte`·`lt`·`lte`）只认 `optional`——写 `optional` 不会顺带放过 `null`。
 6. **`EXPECTED_CODE` 默认 200**：其它状态码（201 / 204 / 4xx）要在规则脚本里显式覆盖。
-7. **类型严格相等**：`eq` / `in_list` / `not_in_list` / `shared_eq` 都是 `==` 比较，`True` 与 `"True"`、`103` 与 `"103"`、`[]` 与 `"[]"` 都不相等。期望值写成 Python 字面量，别加引号。
+7. **类型严格相等**：`eq` / `in_list` / `not_in_list` / `shared_eq` 都是 `==` 比较，`True` 与 `"True"`、`103` 与 `"103"`、`[]` 与 `"[]"` 都不相等。期望值写成 Python 字面量，别加引号。`_query_all` 里的值**全是字符串**，跟数字比要么加 `loose`，要么取单个下标再配 `loose`。
 8. **规则脚本里写 `onRequest` 会覆盖引擎的**：引擎注入的 `onRequest` 不再生效，请求体 / 查询参数的收集要自己补。推荐先 `_engine_onRequest = onRequest` 存一份再调用（见第五节 3)。
 9. **204 没有响应体**：`EXPECTED_CODE = 204` 会因 `JSON 解析失败` 提前返回，成功场景别和 200 的清单共用一份。
 10. **数组元素不是对象时别用 `for_each`**：同一个 `event_types`，详情接口返回对象数组，列表接口可能只返回 ID 数组（`[168, 169]`）。对 ID 数组跑 `for_each`，每个元素都会报「数组元素是 int，不是对象」。先确认响应结构，ID 数组只需 `exists` 或 `top_fields`。
@@ -721,10 +814,11 @@ def onRequest(context, request):
 
 - **硬编码的 `eq` 值**：`location.timezone == "Asia/Taipei"` 这类固定值断言在多地区 / 多环境数据下容易误报，建议按环境拆规则脚本或抽成可配置项。
 - **改规则不动引擎**：`reqable_check_core.py` 被多个规则脚本共用，升级前先做回归。
-- **可选字段用 `optional`**：随 `event_type` 变化的字段（`frequency`、`zones` 等）别写成必需。
+- **可选字段 / 可选对象 / 可选数组都用 `optional`**：随 `event_type` 变化的字段（`frequency`、`zones`）别写成必需；对象配 `top_fields` + `path` 或 `sub_checks`，数组配 `for_each` / `list_field`，都加 `"optional": True`。
 - **Q：报「公共引擎不存在」？** 检查 `~/Documents/reqable/reqable_check_core.py` 是否在位、`~` 是否正确展开。
 - **Q：字段明明有值却判失败？** 看是不是 `exists` 默认严格（null / 空串也失败）、`for_each` 指到了对象而非数组，或 `eq` 的期望值类型写错（字符串 vs 数字）。`top_fields` 报缺失时看行尾的「实际有」列表——键名对不上就是 `path` 指错了对象（复制别的检查忘改）。
 - **Q：`shared_eq` 一直显示「跳过」？** 先看 `onRequest` 打印的 `shared = {...}` 里有没有那个键；注意 `shared_key` 填的是键名，不是 `shared`。
+- **Q：写了 `shared_key` 但没在比对？** 看是不是 kind 写成了 `exists` / `top_fields` 这类不认 `shared_key` 的——行首会有 `⚠️ kind=exists 不支持 ['shared_key']`。要比对就用 `shared_eq` / `shared_in` / `shared_not_in` / `shared_contains`。顺带一提：`exists` 默认把 `[]` 当空值判 ❌，`event_types: []` 这种会红。
 - **Q：`shared` 里没有 URL 里的那个 ID？** 引擎只收「末两段、且末段像 ID（纯数字 / UUID）」，键名是**倒数第二段原样**——`/v2/events/record/xxxxxx` 是 `record`，不是 `id`；`/apiserver/v2/events/vlm-relationship/206` 是 `vlm-relationship`（连字符保留，不转下划线）；段名里带数字（`face-detection2`）或末段不像 ID 就不会收；`/record/{id}/objects` 这种 ID 在中间的要自己补（第五节 3）。
 - **Q：URL 明明带了参数，`shared` 还是 `{}`？** 多半是 Reqable 里挂的引擎还是旧版（旧版 `onRequest` 只收请求体，GET 就是空）；换成当前 `reqable_check_core.py` 后 `?ids=1&ids=2` 会出现 `_query`。
 - **Q：`sub_checks` 整组显示「跳过」？** 说明那个对象是 `null`，按设计视为正常。若它本该存在，另加一条 `{"desc": "camera 必须存在", "kind": "exists", "path": "camera"}` 断言非 null。
