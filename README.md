@@ -27,7 +27,7 @@ import os
 
 CORE = os.path.abspath(os.path.expanduser(r"~/Documents/reqable/reqable_check_core.py"))
 if not os.path.isfile(CORE):
-    raise FileNotFoundError(f"公共引擎不存在: {CORE}（用 ~ 或绝对路径，别用裸相对路径）")
+    raise FileNotFoundError(f"公共引擎不存在: {CORE}（用 ~ 或绝对路径）")
 
 exec(compile(open(CORE, encoding="utf-8").read(), CORE, "exec"), globals())
 
@@ -102,10 +102,9 @@ checks = [
 **1. 记录自身必需字段 → `top_fields`**
 
 ```python
-{"desc": "记录自身必需字段", "kind": "top_fields",
- "fields": ["id", "name", "task_status", "operating_status", "scheduler",
-            "event_types", "camera", "location", "cluster", "snapshot",
-            "object_size_filter", "confidence_threshold"]},
+{"desc": "记录自身必需字段", "kind": "top_fields", "fields":
+  ["id", "name", "task_status", "operating_status", "scheduler", "event_types", "camera", "location", "cluster", "snapshot", "object_size_filter", "confidence_threshold"]
+},
 ```
 
 > `desc` 只是给人看的标签（引擎不解析），但它会出现在每一行输出里，所以建议按层级用词统一：
@@ -124,14 +123,16 @@ checks = [
 **2. 可选单个对象 → `sub_checks`**（一个对象要查很多字段时，打包成一组；对象为 `null` 整组跳过）
 
 ```python
-{"desc": "camera", "kind": "sub_checks", "path": "camera", "sub": [
-    {"desc": "必需字段", "kind": "top_fields",
-     "fields": ["id", "name", "source_url", "fps", "resolution_height",
-                "resolution_width", "model_name", "coordinates", "address"]},
-    {"desc": "coordinates 字段", "kind": "top_fields", "path": "coordinates",
-     "fields": ["latitude", "longitude"]},
-    {"desc": "source_url 非空", "kind": "exists", "path": "source_url"},
-]},
+{"desc": "camera", "kind": "sub_checks", "path": "camera", "sub":
+  [{"desc": "必需字段", "kind": "top_fields", "fields":
+    ["id", "name", "source_url", "fps", "resolution_height",
+      "resolution_width", "model_name", "coordinates", "address"]
+  },
+  {"desc": "coordinates 字段", "kind": "top_fields", "path": "coordinates", "fields":
+    ["latitude", "longitude"]
+  },
+  {"desc": "source_url 非空", "kind": "exists", "path": "source_url"}]
+},
 ```
 
 `sub` 里的 `path` **从对象内部写起**（`"coordinates"` 而不是 `"camera.coordinates"`）；子检查可以是任意 kind，也能再套 `for_each`。
@@ -139,8 +140,9 @@ checks = [
 只有一两个字段要查时，直接用 `top_fields` + `path` 更省事（效果一样，`null` 也放行）：
 
 ```python
-{"desc": "camera.coordinates 的必需字段", "kind": "top_fields",
- "path": "camera.coordinates", "fields": ["latitude", "longitude"]},
+{"desc": "camera.coordinates 的必需字段", "kind": "top_fields", "path": "camera.coordinates", "fields":
+  ["latitude", "longitude"]
+},
 ```
 
 `sub_checks` 的三种边界：对象为 `null` → 整组 ℹ️ 跳过；对象整体不存在 → 默认 ❌，加 `optional: True`（旧写法 `null_ok: True`）放行；对象不是 dict（是数组/字符串）→ ❌ 并提示改用 `for_each`。`path` 写 `"."` 或省略表示当前对象本身。
@@ -150,9 +152,9 @@ checks = [
 同一个数组里，某些记录有 `model_settings`、某些没有，或者它是 `null` / `{}`——这些都是**可选对象**，不该判失败：
 
 ```python
-{"desc": "model_settings 的必需字段", "kind": "top_fields",
- "path": "model_settings", "fields": ["id", "name", "version"],
- "optional": True, "null_ok": True},
+{"desc": "model_settings 的必需字段", "kind": "top_fields", "path": "model_settings", "fields":
+  ["id", "name", "version"],
+  "optional": True, "null_ok": True},
 ```
 
 - `optional: True` → 字段 `model_settings` **整体不存在**（这条记录没有这个对象）：ℹ️ 跳过
@@ -164,12 +166,10 @@ checks = [
 对象存在时还要查好几组字段（每组各有可选性）时，用 `sub_checks` 打包：
 
 ```python
-{"desc": "model_settings", "kind": "sub_checks", "path": "model_settings",
- "optional": True, "sub": [
-    {"desc": "必需字段", "kind": "top_fields", "fields": ["id", "name", "version"]},
-    {"desc": "scheduler 可选子对象", "kind": "top_fields", "path": "scheduler",
-     "fields": ["id", "name"], "optional": True},
-]},
+{"desc": "model_settings", "kind": "sub_checks", "path": "model_settings", "optional": True, "sub":
+  [{"desc": "必需字段", "kind": "top_fields", "fields": ["id", "name", "version"]},
+  {"desc": "scheduler 可选子对象", "kind": "top_fields", "path": "scheduler", "fields": ["id", "name"], "optional": True}]
+},
 ```
 
 **2.6 可选对象 / 可选数组：容器类检查统一用 `optional`**
@@ -184,9 +184,9 @@ checks = [
 | 数组（只看字段在不在） | `list_field` | `optional: True` | 旧写法 `null_ok` 等价 |
 
 ```python
-{"desc": "zones 列表", "kind": "for_each", "path": "zones", "optional": True, "sub": [
-    {"desc": "必需字段", "kind": "top_fields", "fields": ["id", "name", "geometry"]},
-]},
+{"desc": "zones 列表", "kind": "for_each", "path": "zones", "optional": True, "sub":
+  [{"desc": "必需字段", "kind": "top_fields", "fields": ["id", "name", "geometry"]}]
+},
 ```
 
 > 不写 `optional` 时「东西不存在」照旧 ❌——这是故意的，否则 `path` 拼错（`zzones`）也会静默通过。数组/对象的值本身为 `null` 时仍按原行为视为正常（`sub_checks` 整组跳过、`for_each` 打 ℹ️）。
@@ -195,7 +195,7 @@ checks = [
 
 ```python
 {"desc": "timezone 应为 Asia/Taipei", "kind": "eq",
- "path": "location.timezone", "value": "Asia/Taipei"},          # 嵌套写法
+  "path": "location.timezone", "value": "Asia/Taipei"},          # 嵌套写法
 {"desc": "某顶层字段应为 X", "kind": "eq", "key": "task_status", "value": "active"},  # 顶层写法
 ```
 
@@ -205,9 +205,9 @@ checks = [
 
 ```python
 {"desc": "信心阈值 >= 0", "kind": "gte", "path": "detecting_threshold",
- "value": 0, "optional": True},
+  "value": 0, "optional": True},
 {"desc": "信心阈值 <= 1", "kind": "lte", "path": "detecting_threshold",
- "value": 1, "optional": True},
+  "value": 1, "optional": True},
 ```
 
 | 响应里的情况 | 不写 `optional` | `optional: True` |
@@ -226,12 +226,13 @@ checks = [
 
 ```python
 {"desc": "task_status 取值", "kind": "in_list", "path": "task_status",
- "value": ["operating", "non-operating"]},                                     # 字符串枚举
+  "value": ["operating", "non-operating"]},                                     # 字符串枚举
 {"desc": "vlm_image_resize 取值", "kind": "in_list", "path": "vlm_image_resize",
- "value": ["384", "576", "768"]},                                              # 字符串数字枚举
-{"desc": "event_types 逐个 polygon_type", "kind": "for_each", "path": "event_types", "sub": [
-    {"desc": "polygon_type 取值", "kind": "in_list", "path": "polygon_type",
-     "value": ["polygon", "line", "rectangle"]}]},
+  "value": ["384", "576", "768"]},                                              # 字符串数字枚举
+{"desc": "event_types 逐个 polygon_type", "kind": "for_each", "path": "event_types", "sub":
+  [{"desc": "polygon_type 取值", "kind": "in_list", "path": "polygon_type", "value":
+    ["polygon", "line", "rectangle"]}]
+},
 ```
 
 ```
@@ -253,7 +254,7 @@ checks = [
 
 ```python
 {"desc": "task_status 不能是删除态", "kind": "not_in_list", "path": "task_status",
- "value": ["deleted", "archived"]},
+  "value": ["deleted", "archived"]},
 ```
 
 ```
@@ -310,12 +311,12 @@ checks = [
 ```python
 # 数字过滤：响应每条只需包含该 event_type（可能还有别的）
 {"desc": "event_type_ids 响应与请求检查", "kind": "shared_contains",
- "path": "event_types.event_type_id", "shared_key": "_query_all.event_type_ids", "loose": True,
- "when": {"shared_key": "_query_all.event_type_ids.0", "numeric": True}},
+  "path": "event_types.event_type_id", "shared_key": "_query_all.event_type_ids", "loose": True,
+  "when": {"shared_key": "_query_all.event_type_ids.0", "numeric": True}},
 
 # 关键字过滤 other：这类图片不带 event_type，响应 event_types 应为空
 {"desc": "other 过滤时 event_types 应为空", "kind": "eq", "path": "event_types", "value": [],
- "when": {"shared_key": "_query_all.event_type_ids.0", "eq": "other"}},
+  "when": {"shared_key": "_query_all.event_type_ids.0", "eq": "other"}},
 ```
 
 ```
@@ -351,8 +352,8 @@ checks = [
 
 ```python
 {"desc": "event_types 字段是否存在(允许null)", "kind": "exists",
- "null_ok": True, "optional": True,
- "fields": ["frequency", "detecting_duration", "detecting_threshold", "interval", "zones"]},
+  "null_ok": True, "optional": True,
+  "fields": ["frequency", "detecting_duration", "detecting_threshold", "interval", "zones"]},
 ```
 
 这里 `optional: True` 表示这些字段本身是**可选项**：缺失只提示、不算失败（随 `event_type` 不同而不同）。
@@ -362,14 +363,15 @@ checks = [
 **5. 数组逐项 → `for_each` + `sub`（可套两层）**
 
 ```python
-{"desc": "event_types.zones 每个区域必需字段", "kind": "for_each", "path": "event_types", "sub": [
-    {"desc": "zones 每项", "kind": "for_each", "path": "zones", "null_ok": True, "sub": [
-        {"desc": "区域必需字段", "kind": "top_fields",
-         "fields": ["id", "name", "polygon_type", "geometry"]},
-        {"desc": "geometry.type 字段是否存在(允许null)", "kind": "exists", "path": "geometry.type"},
-        {"desc": "geometry.coordinates 字段是否存在", "kind": "exists", "path": "geometry.coordinates"},
-    ]},
-]},
+{"desc": "event_types.zones 每个区域必需字段", "kind": "for_each", "path": "event_types", "sub":
+  [{"desc": "zones 每项", "kind": "for_each", "path": "zones", "null_ok": True, "sub":
+    [{"desc": "区域必需字段", "kind": "top_fields", "fields":
+      ["id", "name", "polygon_type", "geometry"]
+    },
+    {"desc": "geometry.type 字段是否存在(允许null)", "kind": "exists", "path": "geometry.type"},
+    {"desc": "geometry.coordinates 字段是否存在", "kind": "exists", "path": "geometry.coordinates"}]
+  }]
+},
 ```
 
 `null_ok: True` 在这里表示：某些 event_type **没有 `zones` 数组**也放行（可选数组）。
@@ -390,11 +392,11 @@ checks = [
 数组套数组还可以用 `"path": "."` 指回「当前元素本身」，省掉一层多余字段名：
 
 ```python
-{"desc": "detected_objects 逐组", "kind": "for_each", "path": "detected_objects", "sub": [
-    {"desc": "组内逐框", "kind": "for_each", "path": ".", "sub": [
-        {"desc": "框必需字段", "kind": "top_fields", "fields": ["label", "confidence", "bbox"]},
-    ]},
-]},
+{"desc": "detected_objects 逐组", "kind": "for_each", "path": "detected_objects", "sub":
+  [{"desc": "组内逐框", "kind": "for_each", "path": ".", "sub":
+    [{"desc": "框必需字段", "kind": "top_fields", "fields": ["label", "confidence", "bbox"]}]
+  }]
+},
 ```
 
 **6. `list_field`**（当前规则未用到）
@@ -406,19 +408,19 @@ checks = [
 ```python
 # 响应回显请求体里的字段（请求体顶层字段已平铺到 shared 根上）
 {"desc": "响应 event_type_id 与请求一致", "kind": "shared_eq",
- "path": "event_type_id", "require_shared": True},
+  "path": "event_type_id", "require_shared": True},
 
 # 列表接口：返回的每条记录 id 都属于请求 ?ids=1&ids=2
 {"desc": "每条 id 都属于请求的 ids", "kind": "shared_in",
- "path": "id", "shared_key": "_query.ids", "require_shared": True},
+  "path": "id", "shared_key": "_query.ids", "require_shared": True},
 
 # 排除名单：返回的 id 不能出现在 ?exclude_ids=9&exclude_ids=10 里
 {"desc": "id 不在排除名单", "kind": "shared_not_in",
- "path": "id", "shared_key": "_query.exclude_ids", "require_shared": True},
+  "path": "id", "shared_key": "_query.exclude_ids", "require_shared": True},
 
 # 创建接口：响应必须包含请求传的每个 id（服务端会补默认项，不能要求完全一致）
 {"desc": "event_type_ids 响应包含请求", "kind": "shared_contains",
- "path": "event_types.id", "shared_key": "event_type_ids", "require_shared": True},
+  "path": "event_types.id", "shared_key": "event_type_ids", "require_shared": True},
 ```
 
 ### null / 缺失规则（最容易混）
@@ -538,56 +540,57 @@ shared = {"_query": {"event_record_status": "False Alarm"}, "_query_all": {"even
 ```python
 # 请求体回显（顶层字段已平铺，可省略 shared_key）
 {"desc": "响应 event_type_id 与请求一致", "kind": "shared_eq",
- "path": "event_type_id", "require_shared": True},
+  "path": "event_type_id", "require_shared": True},
 
 # 嵌套请求体字段走 _body
 {"desc": "object_key 与请求一致", "kind": "shared_eq",
- "path": "object_key", "shared_key": "_body.data.object_key"},
+  "path": "object_key", "shared_key": "_body.data.object_key"},
 
 # 422 的 input 是原始字符串，query 参数已被转成 int —— 加 loose 让 '3000' 等于 3000
 #   ?size=3000 → shared: _query.size = 3000(int) / _query_all.size = ["3000"](str)
 {"desc": "input 与请求参数一致", "kind": "shared_eq",
- "path": "detail.0.input", "shared_key": "_query.size", "loose": True, "require_shared": True},
+  "path": "detail.0.input", "shared_key": "_query.size", "loose": True, "require_shared": True},
 # 不想放宽类型就去取原始字符串，效果一样
 {"desc": "input 与请求参数一致", "kind": "shared_eq",
- "path": "detail.0.input", "shared_key": "_query_all.size.0", "require_shared": True},
+  "path": "detail.0.input", "shared_key": "_query_all.size.0", "require_shared": True},
 
 # 过滤接口：?event_type_ids=103 返回的图片，event_types 里可能还带别的类型
 #   响应投影 [103] / [103, 17469]，请求侧 _query_all 是 ['103'] → 用 shared_contains + loose
 #   这里千万别用 shared_eq：它要求两边一模一样，[103, 17469] 永远过不了
 {"desc": "event_type_ids 响应与请求检查", "kind": "shared_contains",
- "path": "event_types.event_type_id", "shared_key": "_query_all.event_type_ids", "loose": True},
+  "path": "event_types.event_type_id", "shared_key": "_query_all.event_type_ids", "loose": True},
 
 # 列表接口：?ids=1&ids=2 返回 {"total":2,"results":[...]}，逐条判归属
 {"desc": "每条 id 都属于请求的 ids", "kind": "shared_in",
- "path": "id", "shared_key": "_query.ids", "require_shared": True},
+  "path": "id", "shared_key": "_query.ids", "require_shared": True},
 
 # 请求体是数组：[{"event_type_id":103},{"event_type_id":206}]，取字段自动投影成列表
-{"desc": "每条 event_type_id 都属于请求", "kind": "for_each", "path": "successful", "sub": [
-    {"desc": "event_type_id 属于请求", "kind": "shared_in", "path": "event_type_id",
-     "shared_key": "_body.event_type_id", "require_shared": True}]},
+{"desc": "每条 event_type_id 都属于请求", "kind": "for_each", "path": "successful", "sub":
+  [{"desc": "event_type_id 属于请求", "kind": "shared_in", "path": "event_type_id",
+    "shared_key": "_body.event_type_id", "require_shared": True}]
+},
 
 # 响应字段本身是数组：detail.task_ids = [144310, 144311] 对 ?ids=144310，逐个判归属
 {"desc": "每条 task_id 都属于请求", "kind": "shared_in",
- "path": "detail.task_ids", "shared_key": "_query.ids", "require_shared": True},
+  "path": "detail.task_ids", "shared_key": "_query.ids", "require_shared": True},
 
 # 排除名单：请求 ?exclude_ids=9&exclude_ids=10，返回的 id 一个都不能落在名单里
 {"desc": "id 不在排除名单", "kind": "shared_not_in",
- "path": "id", "shared_key": "_query.exclude_ids", "require_shared": True},
+  "path": "id", "shared_key": "_query.exclude_ids", "require_shared": True},
 
 # 响应数组对排除名单：每个元素都不能命中（如返回的 task_ids 不含已删除的）
 {"desc": "task_ids 不含已排除的 id", "kind": "shared_not_in",
- "path": "detail.task_ids", "shared_key": "_body.exclude_ids", "require_shared": True},
+  "path": "detail.task_ids", "shared_key": "_body.exclude_ids", "require_shared": True},
 
 # 创建接口：请求只传了 event_type_ids=[103]，响应多了服务端默认项（15608 / 206 / 207）
 {"desc": "event_type_ids 响应包含请求", "kind": "shared_contains",
- "path": "event_types.id", "shared_key": "event_type_ids", "require_shared": True},
+  "path": "event_types.id", "shared_key": "event_type_ids", "require_shared": True},
 
 # 元素字段不统一：events 里第一条写 vlm_flow_id、其余写 id —— 用 ? 松散投影，各查一遍
 {"desc": "请求的 event id 都出现在响应中", "kind": "shared_contains",
- "path": "event_types.id", "shared_key": "_body.events.id?", "require_shared": True},
+  "path": "event_types.id", "shared_key": "_body.events.id?", "require_shared": True},
 {"desc": "请求的 vlm_flow_id 都出现在响应中", "kind": "shared_contains",
- "path": "event_types.id", "shared_key": "_body.events.vlm_flow_id?", "require_shared": True},
+  "path": "event_types.id", "shared_key": "_body.events.vlm_flow_id?", "require_shared": True},
 ```
 
 输出示例：
@@ -639,17 +642,22 @@ shared = {"_query": {"event_record_status": "False Alarm"}, "_query_all": {"even
 ```python
 # ① 集合层：请求里的每个 event 都得在响应里（抓「没保存成功」）
 {"desc": "请求的 event 都出现在响应中", "kind": "shared_contains",
- "path": "event_types.id", "shared_key": "_body.events.id?", "require_shared": True},
+  "path": "event_types.id", "shared_key": "_body.events.id?", "require_shared": True},
 
 # ② 逐 event：外层 id 配上了才往下比 zones
-{"desc": "event 与请求对账", "kind": "for_each", "path": "event_types", "label": "id", "sub": [
-    # ②-1 zone id 是否一致（请求的每个 zone 都要在响应里）
+{"desc": "event 与请求对账", "kind": "for_each", "path": "event_types", "label": "id", "sub":
+  [ # ②-1 zone id 是否一致（请求的每个 zone 都要在响应里）
     {"desc": "zone id 包含请求的", "kind": "shared_contains", "path": "zones?.id",
-     "shared_key": "_body.events[id=${id}|vlm_flow_id=${id}].zones.id?"},
+      "shared_key": "_body.events[id=${id}|vlm_flow_id=${id}].zones.id?"
+    },
     # ②-2 同一个 zone id，比坐标
-    {"desc": "zone 坐标", "kind": "for_each", "path": "zones?", "null_ok": True, "label": "id", "sub": [
-        {"desc": "coordinates 一致", "kind": "shared_eq", "path": "geometry.coordinates",
-         "shared_key": "_body.events[id=${..id}|vlm_flow_id=${..id}].zones[id=${id}].coordinates"}]}]}
+    {"desc": "zone 坐标", "kind": "for_each", "path": "zones?", "null_ok": True, "label": "id", "sub":
+      [{"desc": "coordinates 一致", "kind": "shared_eq", "path": "geometry.coordinates",
+        "shared_key": "_body.events[id=${..id}|vlm_flow_id=${..id}].zones[id=${id}].coordinates"
+      }]
+    }
+  ]
+}
 ```
 
 输出（服务端把坐标改回整幅默认框，只有 206 / 103 两条能配上对）：
@@ -687,7 +695,7 @@ shared = {"record": xxxxxx}
 
 ```python
 {"desc": "响应 id 与 URL 中的 ID 一致", "kind": "shared_eq",
- "path": "id", "shared_key": "record", "require_shared": True},
+  "path": "id", "shared_key": "record", "require_shared": True},
 ```
 
 四条规则：
@@ -713,7 +721,7 @@ def onRequest(context, request):
 
 ```python
 {"desc": "响应 id 与 URL 中的 ID 一致", "kind": "shared_eq",
- "path": "id", "shared_key": "_path_ids.0", "require_shared": True},
+  "path": "id", "shared_key": "_path_ids.0", "require_shared": True},
 ```
 
 - **存 `int` 不能存 `str`**：`144310 != "144310"`，存成字符串会永远失败。
@@ -759,18 +767,18 @@ def onRequest(context, request):
 ```python
 # 新增固定值断言
 {"desc": "operating_status 应为 running", "kind": "eq",
- "key": "operating_status", "value": "running"},
+  "key": "operating_status", "value": "running"},
 
 # 新增非 null 断言
 {"desc": "cluster.address 必须非 null", "kind": "exists", "path": "cluster.address"},
 
 # 新增枚举取值断言
 {"desc": "task_status 取值", "kind": "in_list", "path": "task_status",
- "value": ["operating", "non-operating"]},
+  "value": ["operating", "non-operating"]},
 
 # 新增黑名单断言
 {"desc": "task_status 不能是删除态", "kind": "not_in_list", "path": "task_status",
- "value": ["deleted", "archived"]},
+  "value": ["deleted", "archived"]},
 
 # 新增「响应与请求一致」
 {"desc": "响应 device_id 与请求一致", "kind": "shared_eq", "path": "device_id", "require_shared": True},
@@ -779,9 +787,9 @@ def onRequest(context, request):
 {"desc": "每条 id 都属于请求的 ids", "kind": "shared_in", "path": "id", "shared_key": "_query.ids"},
 
 # 新增「可选对象打包一组子检查」
-{"desc": "cluster", "kind": "sub_checks", "path": "cluster", "sub": [
-    {"desc": "必需字段", "kind": "top_fields", "fields": ["id", "name", "address"]},
-]},
+{"desc": "cluster", "kind": "sub_checks", "path": "cluster", "sub":
+  [{"desc": "必需字段", "kind": "top_fields", "fields": ["id", "name", "address"]}]
+},
 ```
 
 `desc` 建议写清「对象 + 字段」，报错时能一眼定位。
